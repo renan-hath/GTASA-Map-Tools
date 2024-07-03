@@ -6,12 +6,13 @@ class Tobj(DataEntry):
     MODEL_INDEX = 1
     TEXTURE_INDEX = 2
     
-    def __init__(self, line):
-        super().__init__(line)
-        self._obj_id = int(super().get_line_elements()[self.ID_INDEX])
-        self._model = super().get_line_elements()[self.MODEL_INDEX]
-        self._texture = super().get_line_elements()[self.TEXTURE_INDEX]
-        self._line = super().formated_line()
+    def __init__(self, line, section, file_type):
+        super().__init__(line, section, file_type)
+        elements = super().get_line_elements()
+        
+        self._obj_id = int(elements[self.ID_INDEX])
+        self._model = elements[self.MODEL_INDEX]
+        self._texture = elements[self.TEXTURE_INDEX]
 
     @property
     def obj_id(self):

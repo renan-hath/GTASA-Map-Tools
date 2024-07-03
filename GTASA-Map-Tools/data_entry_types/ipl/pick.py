@@ -6,11 +6,13 @@ class Pick(DataEntry):
     Y_POS_INDEX = 1
     Z_POS_INDEX = 2
     
-    def __init__(self, line):
-        super().__init__(line)
-        self._x_pos = float(super().get_line_elements()[self.X_POS_INDEX])
-        self._y_pos = float(super().get_line_elements()[self.Y_POS_INDEX])
-        self._z_pos = float(super().get_line_elements()[self.Z_POS_INDEX])
+    def __init__(self, line, section, file_type):
+        super().__init__(line, section, file_type)
+        elements = super().get_line_elements()
+        
+        self._x_pos = float(elements[self.X_POS_INDEX])
+        self._y_pos = float(elements[self.Y_POS_INDEX])
+        self._z_pos = float(elements[self.Z_POS_INDEX])
     
     @property
     def x_pos(self):
@@ -19,7 +21,7 @@ class Pick(DataEntry):
     @x_pos.setter
     def x_pos(self, model):
         self._x_pos = model
-        super().update_line_element(str(self._x_pos, self.X_POS_INDEX))
+        super().update_line_element(str(self._x_pos), self.X_POS_INDEX)
     
     @property
     def y_pos(self):
@@ -28,7 +30,7 @@ class Pick(DataEntry):
     @y_pos.setter
     def y_pos(self, x_pos):
         self._y_pos = x_pos
-        super().update_line_element(str(self._y_pos, self.Y_POS_INDEX))
+        super().update_line_element(str(self._y_pos), self.Y_POS_INDEX)
         
     @property
     def z_pos(self):
@@ -37,4 +39,9 @@ class Pick(DataEntry):
     @z_pos.setter
     def z_pos(self, y_pos):
         self._z_pos = y_pos
-        super().update_line_element(str(self._z_pos, self.Z_POS_INDEX))
+        super().update_line_element(str(self._z_pos), self.Z_POS_INDEX)
+        
+    def move_coordinates(self, x, y, z):
+        self.x_pos += x
+        self.y_pos += y
+        self.z_pos += z

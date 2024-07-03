@@ -1,3 +1,4 @@
+import argparse
 import os
 import chardet
 from collections import defaultdict
@@ -15,21 +16,32 @@ from data_entry_types.ipl.occl import Occl
 from data_entry_types.ipl.pick import Pick
 from data_entry_types.ipl.tcyc import Tcyc
 
-#region Variables
-input_dir = "files"
-output_dir = "modified_files"
-resources_dir = "resources"
-vanilla_objects_file_path = os.path.join(resources_dir, "vanilla_objects.txt")
-FREE_IDS_FILE_PATH = os.path.join(resources_dir, "Free IDs List.txt")
-IDS_IN_USE_FILE_PATH = os.path.join(resources_dir, "ids_in_use.txt")
-ide_file_extension = 'ide'
-ipl_file_extension = 'ipl'
-ide_section_starters = ['objs', 'tobj', 'anim', 'txdp', 'path', '2dfx']
-ipl_section_starters = ['inst', 'cull', 'grge', 'enex', 'pick', 'jump', 'tcyc', 'auzo', 'cars', 'occl', 'mult']
-ide_section_finalizers = ['end']
-ipl_section_finalizers = ['end']
+#region Constants
+INPUT_DIR = "files"
+OUTPUT_DIR = "modified_files"
+RESOURCES_DIR = "resources"
+VANILLA_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, "vanilla_objects.txt")
+FREE_IDS_FILE_PATH = os.path.join(RESOURCES_DIR, "Free IDs List.txt")
+IDS_IN_USE_FILE_PATH = os.path.join(RESOURCES_DIR, "ids_in_use.txt")
+IDE_FILE_EXTENSION = 'ide'
+IPL_FILE_EXTENSION = 'ipl'
 #endregion
 
+#region Global variables
+id_command = False
+map_command = False
+map_command_x = 0
+map_command_y = 0
+map_command_z = 0
+vanilla_objects = {}
+free_ids = []
+ids_in_use = []
+replaced_ids = {}
+input_ide_objects = {}
+input_ipl_objects = defaultdict(list)
+#endregion
+
+#region Functions
 def detect_file_encoding(file_path):
     with open(file_path, 'rb') as f:
         result = chardet.detect(f.read())
@@ -43,73 +55,82 @@ def read_file(file_path):
 def modify_lines(lines, file_extension):
     modified_lines = []
     current_section = None
-    object_line = -1
-    # global read_objects
+    line_position = -1
     
-    if (file_extension == ide_file_extension or file_extension == ipl_file_extension):
+    if (file_extension == IDE_FILE_EXTENSION or file_extension == IPL_FILE_EXTENSION):
         for line in lines:
             modified_line = None
-            data_entry = DataEntry(line)
+            data_entry = DataEntry(line, None, file_extension)
             
             if data_entry.is_comment():
                 modified_lines.append(data_entry.line.rstrip("\n"))
                 continue
             
-            if data_entry.is_section_starter(file_extension):
+            if data_entry.is_section_starter():
                 modified_lines.append(data_entry.formated_line())
-                current_section = data_entry.formated_line()
+                data_entry.section = data_entry.formated_line()
+                current_section = data_entry.section
                 continue
                 
-            if data_entry.is_section_finalizer(file_extension):
+            if data_entry.is_section_finalizer():
                 modified_lines.append(data_entry.formated_line())
-                current_section = None
-                object_line = -1
+                data_entry.section = None
+                current_section = data_entry.section
+                line_position = -1
                 continue
             
-            if (file_extension == ide_file_extension and current_section in ide_section_starters or
-                file_extension == ipl_file_extension and current_section in ipl_section_starters):
-                # read_objects += 1
-                object_line += 1
+            if not current_section is None:
+                data_entry.section = current_section
+            
+            if data_entry.is_object_in_valid_session():
+                line_position += 1
                 
-                if file_extension == ide_file_extension:
-                    if current_section == 'objs':
-                        gta_object = Objs(line) 
-                    elif current_section == 'tobj':
-                        gta_object = Tobj(line)
-                    elif current_section == 'anim':
-                        gta_object = Anim(line)
-                    else:
-                        modified_lines.append(data_entry.line)
-                        continue
-                        
-                elif file_extension == ipl_file_extension:
-                    if current_section == 'inst':
-                        gta_object = Inst(line)
-                    elif current_section == 'cull':
-                        gta_object = Cull(line)
-                    elif current_section == 'grge':
-                        gta_object = Grge(line)
-                    elif current_section == 'enex':
-                        gta_object = Enex(line)
-                    elif current_section == 'pick':
-                        gta_object = Pick(line)
-                    elif current_section == 'tcyc':
-                        gta_object = Tcyc(line)
-                    elif current_section == 'auzo':
-                        gta_object = Auzo(line)
-                    elif current_section == 'cars':
-                        gta_object = Cars(line)
-                    elif current_section == 'occl':
-                        gta_object = Occl(line)
-                    else:
-                        modified_lines.append(data_entry.line)
-                        continue
+                if current_section == 'objs':
+                    gta_object = Objs(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'tobj':
+                    gta_object = Tobj(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'anim':
+                    gta_object = Anim(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'inst':
+                    gta_object = Inst(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'cull':
+                    gta_object = Cull(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'grge':
+                    gta_object = Grge(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'enex':
+                    gta_object = Enex(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'pick':
+                    gta_object = Pick(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'tcyc':
+                    gta_object = Tcyc(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'auzo':
+                    gta_object = Auzo(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'cars':
+                    gta_object = Cars(data_entry.line, data_entry.section, data_entry.file_type) 
+                elif current_section == 'occl':
+                    gta_object = Occl(data_entry.line, data_entry.section, data_entry.file_type) 
+                else:
+                    modified_lines.append(data_entry.formated_line())
+                    continue
                 
-                # If the object model has an ID
+                # If the object has an ID
                 if (isinstance(gta_object, Objs) or isinstance(gta_object, Tobj) or 
-                        isinstance(gta_object, Anim) or isinstance(gta_object, Inst)):
-                    gta_object = update_id(gta_object)
-                    modified_lines.append(gta_object.line)
+                    isinstance(gta_object, Anim) or isinstance(gta_object, Inst)):
+                    
+                    if id_command:
+                        gta_object = update_id(gta_object)
+                
+                # If the object has coordinates
+                if (isinstance(gta_object, Inst) or isinstance(gta_object, Cull) or
+                    isinstance(gta_object, Grge) or isinstance(gta_object, Enex) or
+                    isinstance(gta_object, Pick) or isinstance(gta_object, Tcyc) or
+                    isinstance(gta_object, Auzo) or isinstance(gta_object, Cars) or
+                    isinstance(gta_object, Occl)):
+                    
+                    if map_command:
+                        gta_object = move_coordinates(gta_object)
+                        
+                modified_lines.append(gta_object.formated_line())
                 
     else:
         print(f"File type not supported: {file_extension}")
@@ -147,6 +168,12 @@ def update_id(gta_object):
         # If the object model isn't a vanilla model, give it a new ID
         gta_object = replace_id(gta_object, free_ids[0])
         
+    return gta_object
+
+def move_coordinates(gta_object):
+    gta_object.line = gta_object.formated_line()
+    gta_object.move_coordinates(map_command_x, map_command_y, map_command_z)
+    
     return gta_object
 
 def replace_id(gta_object, new_id):
@@ -238,8 +265,6 @@ def get_free_ids():
     
     return available_ids
 
-
-
 def process_file(file_input_path):
     file_name = os.path.basename(file_input_path)
     file_extension = os.path.splitext(file_name)[1][1:].lower()
@@ -249,10 +274,10 @@ def process_file(file_input_path):
     return modified_lines
 
 def process_files():
-    for file_name in os.listdir(input_dir):
-        file_path = os.path.join(input_dir, file_name)
+    for file_name in os.listdir(INPUT_DIR):
+        file_path = os.path.join(INPUT_DIR, file_name)
         modified_file = process_file(file_path)
-        save_modified_file(modified_file, file_path, output_dir)
+        save_modified_file(modified_file, file_path, OUTPUT_DIR)
 
 def save_modified_file(modified_lines, original_filepath, output_dir='modified_files'):
     original_filename = os.path.basename(original_filepath)
@@ -272,23 +297,25 @@ def save_ids_in_use_file():
         ids_in_use_file.write('\n'.join(ids_in_use_to_be_saved))
     
     print(f"Updated IDs in use at: {IDS_IN_USE_FILE_PATH}")
-
 #endregion
 
 #region Main
-print("Starting the mod tool debug!")
-vanilla_objects = {}
-free_ids = []
-ids_in_use = []
-replaced_ids = {}
-input_ide_objects = {}
-input_ipl_objects = defaultdict(list)
+if __name__ == '__main__':
+    print("Starting the mod tool debug!")
+    
+    parser = argparse.ArgumentParser(description = 'GTASA Map Tools')
+    parser.add_argument('-id', action='store_true', help='Replace game objects IDs')
+    parser.add_argument('-map', nargs = 3, metavar=('X', 'Y', 'Z'), type = float, help = 'Move game objects coordinates')
+    args = parser.parse_args()
+    id_command = args.id
+    map_command = args.map is not None
+    map_command_x = args.map[0] if map_command else None
+    map_command_y = args.map[1] if map_command else None
+    map_command_z = args.map[2] if map_command else None
 
-read_objects = 0
-
-os.makedirs(output_dir, exist_ok=True)
-vanilla_objects = get_vanilla_objects(vanilla_objects_file_path)
-free_ids = get_free_ids()
-process_files()
-save_ids_in_use_file()
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    vanilla_objects = get_vanilla_objects(VANILLA_OBJECTS_FILE_PATH)
+    free_ids = get_free_ids()
+    process_files()
+    save_ids_in_use_file()
 #endregion

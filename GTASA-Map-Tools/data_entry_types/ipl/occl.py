@@ -6,11 +6,13 @@ class Occl(DataEntry):
     Y_MID_POS_INDEX = 1
     Z_BOTTOM_POS_INDEX = 2
     
-    def __init__(self, line):
-        super().__init__(line)
-        self._x_mid_pos = float(super().get_line_elements()[self.X_MID_POS_INDEX])
-        self._y_mid_pos = float(super().get_line_elements()[self.Y_MID_POS_INDEX])
-        self._z_bottom_pos = float(super().get_line_elements()[self.Z_BOTTOM_POS_INDEX])
+    def __init__(self, line, section, file_type):
+        super().__init__(line, section, file_type)
+        elements = super().get_line_elements()
+        
+        self._x_mid_pos = float(elements[self.X_MID_POS_INDEX])
+        self._y_mid_pos = float(elements[self.Y_MID_POS_INDEX])
+        self._z_bottom_pos = float(elements[self.Z_BOTTOM_POS_INDEX])
     
     @property
     def x_mid_pos(self):
@@ -19,7 +21,7 @@ class Occl(DataEntry):
     @x_mid_pos.setter
     def x_mid_pos(self, model):
         self._x_mid_pos = model
-        super().update_line_element(str(self._x_mid_pos, self.X_MID_POS_INDEX))
+        super().update_line_element(str(self._x_mid_pos), self.X_MID_POS_INDEX)
     
     @property
     def y_mid_pos(self):
@@ -28,7 +30,7 @@ class Occl(DataEntry):
     @y_mid_pos.setter
     def y_mid_pos(self, x_pos):
         self._y_mid_pos = x_pos
-        super().update_line_element(str(self._y_mid_pos, self.Y_MID_POS_INDEX))
+        super().update_line_element(str(self._y_mid_pos), self.Y_MID_POS_INDEX)
         
     @property
     def z_bottom_pos(self):
@@ -37,4 +39,9 @@ class Occl(DataEntry):
     @z_bottom_pos.setter
     def z_bottom_pos(self, y_pos):
         self._z_bottom_pos = y_pos
-        super().update_line_element(str(self._z_bottom_pos, self.Z_BOTTOM_POS_INDEX))
+        super().update_line_element(str(self._z_bottom_pos), self.Z_BOTTOM_POS_INDEX)
+        
+    def move_coordinates(self, x, y, z):
+        self.x_mid_pos += x
+        self.y_mid_pos += y
+        self.z_bottom_pos += z

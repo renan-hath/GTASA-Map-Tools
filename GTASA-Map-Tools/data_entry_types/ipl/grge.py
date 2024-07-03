@@ -11,16 +11,19 @@ class Grge(DataEntry):
     CUBE_Y_INDEX = 6
     CUBE_Z_INDEX = 7
     
-    def __init__(self, line):
-        super().__init__(line)
-        self._x_pos = float(super().get_line_elements()[self.X_POS_INDEX])
-        self._y_pos = float(super().get_line_elements()[self.Y_POS_INDEX])
-        self._z_pos = float(super().get_line_elements()[self.Z_POS_INDEX])
-        self._line_x = float(super().get_line_elements()[self.LINE_X_INDEX])
-        self._line_y = float(super().get_line_elements()[self.LINE_Y_INDEX])
-        self._cube_x = float(super().get_line_elements()[self.CUBE_X_INDEX])
-        self._cube_y = float(super().get_line_elements()[self.CUBE_Y_INDEX])
-        self._cube_z = float(super().get_line_elements()[self.CUBE_Z_INDEX])
+    def __init__(self, line, section, file_type):
+        super().__init__(line, section, file_type)
+        elements = super().get_line_elements()
+        
+        self._x_pos = float(elements[self.X_POS_INDEX])
+        self._y_pos = float(elements[self.Y_POS_INDEX])
+        self._z_pos = float(elements[self.Z_POS_INDEX])
+        self._line_x = float(elements[self.LINE_X_INDEX])
+        self._line_y = float(elements[self.LINE_Y_INDEX])
+        self._cube_x = float(elements[self.CUBE_X_INDEX])
+        self._cube_y = float(elements[self.CUBE_Y_INDEX])
+        self._cube_z = float(elements[self.CUBE_Z_INDEX])
+        
 
     @property
     def x_pos(self):
@@ -38,7 +41,7 @@ class Grge(DataEntry):
     @y_pos.setter
     def y_pos(self, model):
         self._y_pos = model
-        super().update_line_element(str(self._y_pos, self.Y_POS_INDEX))
+        super().update_line_element(str(self._y_pos), self.Y_POS_INDEX)
     
     @property
     def z_pos(self):
@@ -47,7 +50,7 @@ class Grge(DataEntry):
     @z_pos.setter
     def z_pos(self, x_pos):
         self._z_pos = x_pos
-        super().update_line_element(str(self._z_pos, self.Z_POS_INDEX))
+        super().update_line_element(str(self._z_pos), self.Z_POS_INDEX)
         
     @property
     def line_x(self):
@@ -56,7 +59,7 @@ class Grge(DataEntry):
     @line_x.setter
     def line_x(self, y_pos):
         self._line_x = y_pos
-        super().update_line_element(str(self._line_x, self.LINE_X_INDEX))
+        super().update_line_element(str(self._line_x), self.LINE_X_INDEX)
         
     @property
     def line_y(self):
@@ -65,7 +68,7 @@ class Grge(DataEntry):
     @line_y.setter
     def line_y(self, z_pos):
         self._line_y = z_pos
-        super().update_line_element(str(self._line_y, self.LINE_Y_INDEX))
+        super().update_line_element(str(self._line_y), self.LINE_Y_INDEX)
         
     @property
     def cube_x(self):
@@ -74,7 +77,7 @@ class Grge(DataEntry):
     @cube_x.setter
     def cube_x(self, x_rot):
         self._cube_x = x_rot
-        super().update_line_element(str(self._cube_x, self.CUBE_X_INDEX))
+        super().update_line_element(str(self._cube_x), self.CUBE_X_INDEX)
         
     @property
     def cube_y(self):
@@ -83,7 +86,7 @@ class Grge(DataEntry):
     @cube_y.setter
     def cube_y(self, y_rot):
         self._cube_y = y_rot
-        super().update_line_element(str(self._cube_y, self.CUBE_Y_INDEX))
+        super().update_line_element(str(self._cube_y), self.CUBE_Y_INDEX)
         
     @property
     def cube_z(self):
@@ -92,4 +95,14 @@ class Grge(DataEntry):
     @cube_z.setter
     def cube_z(self, z_rot):
         self._cube_z = z_rot
-        super().update_line_element(str(self._cube_z, self.CUBE_Z_INDEX))
+        super().update_line_element(str(self._cube_z), self.CUBE_Z_INDEX)
+        
+    def move_coordinates(self, x, y, z):
+        self.x_pos += x
+        self.line_x += x
+        self.cube_x += x
+        self.y_pos += y
+        self.line_y += y
+        self.cube_y += y
+        self.z_pos += z
+        self.cube_z += z

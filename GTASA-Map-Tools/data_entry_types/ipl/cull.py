@@ -7,12 +7,14 @@ class Cull(DataEntry):
     CENTER_Z_INDEX = 2
     BOTTOM_Z_INDEX = 5
     
-    def __init__(self, line):
-        super().__init__(line)
-        self._center_x = float(super().get_line_elements()[self.CENTER_X_INDEX])
-        self._center_y = float(super().get_line_elements()[self.CENTER_Y_INDEX])
-        self._center_z = float(super().get_line_elements()[self.CENTER_Z_INDEX])
-        self._bottom_z = float(super().get_line_elements()[self.BOTTOM_Z_INDEX])
+    def __init__(self, line, section, file_type):
+        super().__init__(line, section, file_type)
+        elements = super().get_line_elements()
+        
+        self._center_x = float(elements[self.CENTER_X_INDEX])
+        self._center_y = float(elements[self.CENTER_Y_INDEX])
+        self._center_z = float(elements[self.CENTER_Z_INDEX])
+        self._bottom_z = float(elements[self.BOTTOM_Z_INDEX])
 
     @property
     def center_x(self):
@@ -30,7 +32,7 @@ class Cull(DataEntry):
     @center_y.setter
     def center_y(self, model):
         self._center_y = model
-        super().update_line_element(str(self._center_y, self.CENTER_Y_INDEX))
+        super().update_line_element(str(self._center_y), self.CENTER_Y_INDEX)
     
     @property
     def center_z(self):
@@ -39,7 +41,7 @@ class Cull(DataEntry):
     @center_z.setter
     def center_z(self, x_pos):
         self._center_z = x_pos
-        super().update_line_element(str(self._center_z, self.CENTER_Z_INDEX))
+        super().update_line_element(str(self._center_z), self.CENTER_Z_INDEX)
         
     @property
     def bottom_z(self):
@@ -48,4 +50,10 @@ class Cull(DataEntry):
     @bottom_z.setter
     def bottom_z(self, y_pos):
         self._bottom_z = y_pos
-        super().update_line_element(str(self._bottom_z, self.BOTTOM_Z_INDEX))
+        super().update_line_element(str(self._bottom_z), self.BOTTOM_Z_INDEX)
+        
+    def move_coordinates(self, x, y, z):
+        self.center_x += x
+        self.center_y += y
+        self.center_z += z
+        self.bottom_z += z
