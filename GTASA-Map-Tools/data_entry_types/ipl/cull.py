@@ -7,8 +7,8 @@ class Cull(DataEntry):
     CENTER_Z_INDEX = 2
     BOTTOM_Z_INDEX = 5
     
-    def __init__(self, line, section, file_type):
-        super().__init__(line, section, file_type)
+    def __init__(self, line, line_position, section, file_name):
+        super().__init__(line, line_position, section, file_name)
         elements = super().get_line_elements()
         
         self._center_x = float(elements[self.CENTER_X_INDEX])

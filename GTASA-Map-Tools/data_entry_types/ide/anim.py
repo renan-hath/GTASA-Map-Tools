@@ -6,8 +6,8 @@ class Anim(DataEntry):
     MODEL_INDEX = 1
     TEXTURE_INDEX = 2
     
-    def __init__(self, line, section, file_type):
-        super().__init__(line, section, file_type)
+    def __init__(self, line, line_position, section, file_name):
+        super().__init__(line, line_position, section, file_name)
         elements = super().get_line_elements()
         
         self._obj_id = int(elements[self.ID_INDEX])

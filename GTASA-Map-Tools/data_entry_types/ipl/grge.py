@@ -11,8 +11,8 @@ class Grge(DataEntry):
     CUBE_Y_INDEX = 6
     CUBE_Z_INDEX = 7
     
-    def __init__(self, line, section, file_type):
-        super().__init__(line, section, file_type)
+    def __init__(self, line, line_position, section, file_name):
+        super().__init__(line, line_position, section, file_name)
         elements = super().get_line_elements()
         
         self._x_pos = float(elements[self.X_POS_INDEX])

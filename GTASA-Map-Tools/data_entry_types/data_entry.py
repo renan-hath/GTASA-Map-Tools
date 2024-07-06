@@ -1,3 +1,6 @@
+import os
+import re
+
 class DataEntry:
     COMMENT_STARTER = '#'
     IDE_SECTIONS = ['objs', 'tobj', 'anim', 'path', '2dfx', 'txdp', 'hier']
@@ -5,10 +8,12 @@ class DataEntry:
     IDE_SECTION_FINALIZERS = ['end']
     IPL_SECTION_FINALIZERS = ['end']
 
-    def __init__(self, line, section, file_type):
+    def __init__(self, line, line_position, section, file_name):
         self._line = line
+        self._line_position = line_position
         self._section = section
-        self._file_type = file_type
+        self._file_name = file_name
+        self._file_type = os.path.splitext(file_name)[1][1:].lower()
 
     @property
     def line(self):
@@ -27,15 +32,34 @@ class DataEntry:
         self._section = section
         
     @property
+    def file_name(self):
+        return self._file_name
+    
+    @file_name.setter
+    def file_name(self, file_name):
+        self._file_name = file_name
+        
+    @property
     def file_type(self):
         return self._file_type
     
     @file_type.setter
     def file_type(self, file_type):
         self._file_type = file_type
+        
+    @property
+    def line_position(self):
+        return self._line_position
+    
+    @line_position.setter
+    def line_position(self, line_position):
+        self._line_position = line_position
+        
+    def get_attributes(self):
+        return self.line, self.line_position, self.section, self.file_name
 
     def get_line_elements(self):
-        elements = [element.strip().lower() for element in self.line.split(',')]
+        elements = [element.strip().lower() for element in re.split(r',\s*|\s(?![,\s])', self.line.strip().lower())]
         
         return elements
 
@@ -63,7 +87,13 @@ class DataEntry:
             self.file_type == 'ipl' and self.formated_line() in self.IPL_SECTION_FINALIZERS):
                 return True
             
-    def is_object_in_valid_session(self):
+    def is_valid_object(self):
+        if (not self.is_comment() and not self.is_section_starter() and 
+        not self.is_section_finalizer() and self.is_in_valid_session() and
+        len(self.get_line_elements()) > 1):
+            return True
+            
+    def is_in_valid_session(self):
         if (self.file_type == 'ide' and self.section in self.IDE_SECTIONS and self.line != self.section or
             self.file_type == 'ipl' and self.section in self.IPL_SECTIONS and self.line != self.section):
                 return True

@@ -6,8 +6,8 @@ class Cars(DataEntry):
     Y_POS_INDEX = 1
     Z_POS_INDEX = 2
     
-    def __init__(self, line, section, file_type):
-        super().__init__(line, section, file_type)
+    def __init__(self, line, line_position, section, file_name):
+        super().__init__(line, line_position, section, file_name)
         elements = super().get_line_elements()
         
         self._x_pos = float(elements[self.X_POS_INDEX])
