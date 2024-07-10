@@ -1,14 +1,14 @@
-from data_entry_types.data_entry import DataEntry
+from application.data_entry_types.str.data_entry_str import DataEntryStr
 
-class Objs(DataEntry):
+class Tobj(DataEntryStr):
     
     ID_INDEX = 0
     MODEL_INDEX = 1
     TEXTURE_INDEX = 2
     
-    def __init__(self, line, line_position, section, file_name):
-        super().__init__(line, line_position, section, file_name)
-        elements = super().get_line_elements()
+    def __init__(self, line, line_position, section, file):
+        super().__init__(line, line_position, section, file)
+        elements = super().get_content_elements()
         
         self._obj_id = int(elements[self.ID_INDEX])
         self._model = elements[self.MODEL_INDEX]
@@ -21,7 +21,7 @@ class Objs(DataEntry):
     @obj_id.setter
     def obj_id(self, id):
         self._obj_id = id
-        super().update_line_element(str(self._obj_id), self.ID_INDEX)
+        super().update_content_element(str(self._obj_id), self.ID_INDEX)
     
     @property
     def model(self):
@@ -30,7 +30,7 @@ class Objs(DataEntry):
     @model.setter
     def model(self, model):
         self._model = model
-        super().update_line_element(self._model, self.MODEL_INDEX)
+        super().update_content_element(self._model, self.MODEL_INDEX)
     
     @property
     def texture(self):
@@ -39,4 +39,4 @@ class Objs(DataEntry):
     @texture.setter
     def texture(self, texture):
         self._texture = texture
-        super().update_line_element(self._texture, self.TEXTURE_INDEX)
+        super().update_content_element(self._texture, self.TEXTURE_INDEX)

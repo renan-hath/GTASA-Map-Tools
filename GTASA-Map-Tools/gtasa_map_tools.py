@@ -1,31 +1,28 @@
 import argparse
 import os
 import chardet
-import copy
-from collections import defaultdict
-from data_entry_types.data_entry import DataEntry
-from data_entry_types.ide.anim import Anim
-from data_entry_types.ide.objs import Objs
-from data_entry_types.ide.tobj import Tobj
-from data_entry_types.ipl.auzo import Auzo
-from data_entry_types.ipl.cars import Cars
-from data_entry_types.ipl.cull import Cull
-from data_entry_types.ipl.enex import Enex
-from data_entry_types.ipl.grge import Grge
-from data_entry_types.ipl.inst import Inst
-from data_entry_types.ipl.occl import Occl
-from data_entry_types.ipl.pick import Pick
-from data_entry_types.ipl.tcyc import Tcyc
+from itertools import chain
+from application.file_types.str.ide import Ide
+from application.file_types.str.ipl import Ipl
+from application.file_types.binary.ipl_binary import IplBinary
+from application.data_entry_types.str.ide.anim import Anim
+from application.data_entry_types.str.ide.objs import Objs
+from application.data_entry_types.str.ide.tobj import Tobj
 
 #region Constants
 INPUT_DIR = "files"
 OUTPUT_DIR = "modified_files"
+BINARY_OUTPUT_DIR = OUTPUT_DIR + "\\" + "ipl_stream"
 RESOURCES_DIR = "resources"
-VANILLA_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, "vanilla_objects.txt")
-FREE_IDS_FILE_PATH = os.path.join(RESOURCES_DIR, "Free IDs List.txt")
-IDS_IN_USE_FILE_PATH = os.path.join(RESOURCES_DIR, "ids_in_use.txt")
+VANILLA_OBJECTS_FILE_NAME = "vanilla_objects.txt"
+VANILLA_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, VANILLA_OBJECTS_FILE_NAME)
+FREE_IDS_FILE_NAME = "Free IDs List.txt"
+FREE_IDS_FILE_PATH = os.path.join(RESOURCES_DIR, FREE_IDS_FILE_NAME)
+IDS_IN_USE_FILE_NAME = "ids_in_use.txt"
+IDS_IN_USE_FILE_PATH = os.path.join(RESOURCES_DIR, IDS_IN_USE_FILE_NAME)
 IDE_FILE_EXTENSION = 'ide'
 IPL_FILE_EXTENSION = 'ipl'
+SUPPORTED_FILE_EXTENSIONS = [IDE_FILE_EXTENSION, IPL_FILE_EXTENSION]
 #endregion
 
 #region Global variables
@@ -35,360 +32,43 @@ map_command = False
 map_command_x = 0
 map_command_y = 0
 map_command_z = 0
+
+files = []
 vanilla_objects = {}
 free_ids = []
+
 ids_in_use = []
 replaced_ids = {}
+
 ide_objects = []
 inst_objects = []
-ide_objects_to_remove = []
-inst_objects_to_remove = []
-inst_main_objects_to_modify = {}
-#endregion
-
-#region Functions
-def detect_file_encoding(file_path):
-    with open(file_path, 'rb') as f:
-        result = chardet.detect(f.read())
-    return result['encoding']
-
-def read_file(file_path):
-    encoding = detect_file_encoding(file_path)
-    with open(file_path, 'r', encoding=encoding) as f:
-        return f.readlines()
-
-def modify_lines(lines, file_name):
-    modified_lines = []
-    file_extension = os.path.splitext(file_name)[1][1:].lower()
-    
-    if fix_command:
-        get_faulty_objects()
-    
-    if (file_extension == IDE_FILE_EXTENSION or file_extension == IPL_FILE_EXTENSION):
-        current_section = None
-        line_position = -1
-        
-        for line in lines:
-            modified_line = None
-            data_entry = DataEntry(line, line_position, None, file_name)
-            
-            if data_entry.is_comment():
-                modified_lines.append(data_entry.line.rstrip("\n"))
-                continue
-            
-            if data_entry.is_section_starter():
-                modified_lines.append(data_entry.formated_line())
-                data_entry.section = data_entry.formated_line()
-                current_section = data_entry.section
-                continue
-                
-            if data_entry.is_section_finalizer():
-                modified_lines.append(data_entry.formated_line())
-                data_entry.section = None
-                current_section = data_entry.section
-                data_entry.line_position = -1
-                line_position = data_entry.line_position
-                
-                continue
-            
-            if not current_section is None:
-                data_entry.section = current_section
-            
-            if data_entry.is_valid_object():
-                data_entry.line_position += 1
-                line_position = data_entry.line_position
-                
-                if current_section == 'objs':
-                    gta_object = Objs(*data_entry.get_attributes()) 
-                elif current_section == 'tobj':
-                    gta_object = Tobj(*data_entry.get_attributes()) 
-                elif current_section == 'anim':
-                    gta_object = Anim(*data_entry.get_attributes()) 
-                elif current_section == 'inst':
-                    gta_object = Inst(*data_entry.get_attributes()) 
-                elif current_section == 'cull':
-                    gta_object = Cull(*data_entry.get_attributes()) 
-                elif current_section == 'grge':
-                    gta_object = Grge(*data_entry.get_attributes()) 
-                elif current_section == 'enex':
-                    gta_object = Enex(*data_entry.get_attributes()) 
-                elif current_section == 'pick':
-                    gta_object = Pick(*data_entry.get_attributes()) 
-                elif current_section == 'tcyc':
-                    gta_object = Tcyc(*data_entry.get_attributes()) 
-                elif current_section == 'auzo':
-                    gta_object = Auzo(*data_entry.get_attributes()) 
-                elif current_section == 'cars':
-                    gta_object = Cars(*data_entry.get_attributes()) 
-                elif current_section == 'occl':
-                    gta_object = Occl(*data_entry.get_attributes()) 
-                else:
-                    modified_lines.append(data_entry.formated_line())
-                    continue
-                
-                # If the object has an ID
-                if ((isinstance(gta_object, Objs) or isinstance(gta_object, Tobj) or isinstance(gta_object, Anim))):
-                    
-                    if fix_command and gta_object in ide_objects_to_remove:
-                        gta_object.line = f'# removed unused object ({gta_object.obj_id}, {gta_object.model})'
-                    elif id_command:
-                        gta_object = update_id(gta_object)
-                        
-                if isinstance(gta_object, Inst):
-                    
-                    if fix_command and gta_object in inst_objects_to_remove:
-                            gta_object.line = f'# removed unused object ({gta_object.obj_id}, {gta_object.model})'
-                    else:
-                        if fix_command and gta_object in inst_main_objects_to_modify:
-                            gta_object = inst_main_objects_to_modify[gta_object]
-                            
-                        if id_command:
-                            gta_object = update_id(gta_object)
-                
-                # If the object has coordinates
-                if (map_command and 
-                    (isinstance(gta_object, Inst) or isinstance(gta_object, Cull) or isinstance(gta_object, Grge) or 
-                     isinstance(gta_object, Enex) or isinstance(gta_object, Pick) or isinstance(gta_object, Tcyc) or 
-                     isinstance(gta_object, Auzo) or isinstance(gta_object, Cars) or isinstance(gta_object, Occl))):
-                    gta_object = move_coordinates(gta_object)
-                        
-                modified_lines.append(gta_object.formated_line())
-                
-    else:
-        print(f"File type not supported: {file_extension}")
-        
-    return modified_lines
-            
-def load_objects_with_ids(lines, file_name):
-    file_extension = os.path.splitext(file_name)[1][1:].lower()
-    
-    if (file_extension == IDE_FILE_EXTENSION or file_extension == IPL_FILE_EXTENSION):
-        current_section = None
-        line_position = -1
-        
-        for line in lines:
-            data_entry = DataEntry(line, line_position, None, file_name)
-            
-            if data_entry.is_comment():
-                continue
-            
-            if data_entry.is_section_starter():
-                data_entry.section = data_entry.formated_line()
-                current_section = data_entry.section
-                continue
-                
-            if data_entry.is_section_finalizer():
-                data_entry.section = None
-                current_section = data_entry.section
-                data_entry.line_position = -1
-                line_position = data_entry.line_position
-                continue
-            
-            if current_section is not None:
-                data_entry.section = current_section
-            
-            if data_entry.is_valid_object():
-                data_entry.line_position += 1
-                line_position = data_entry.line_position
-                
-                if current_section == 'objs':
-                    gta_object = Objs(*data_entry.get_attributes()) 
-                elif current_section == 'tobj':
-                    gta_object = Tobj(*data_entry.get_attributes()) 
-                elif current_section == 'anim':
-                    gta_object = Anim(*data_entry.get_attributes()) 
-                elif current_section == 'inst':
-                    gta_object = Inst(*data_entry.get_attributes()) 
-                else:
-                    continue
-                
-                # If the object is an IDE
-                if isinstance(gta_object, Objs) or isinstance(gta_object, Tobj) or isinstance(gta_object, Anim):
-                    ide_objects.append(gta_object)
-                # If the object is an INST
-                elif isinstance(gta_object, Inst):
-                    inst_objects.append(gta_object)
-    else:
-        print(f"File type not supported: {file_extension}")
-        
-def get_faulty_objects():
-    global ide_objects_to_remove
-    global inst_objects_to_remove
-    global inst_main_objects_to_modify
-    new_ide_objects = [gta_object for gta_object in ide_objects if gta_object.model not in vanilla_objects.values()]
-    new_inst_objects = [gta_object for gta_object in inst_objects if gta_object.model not in vanilla_objects.values()]
-
-    # Remove unused IDE objects
-    for ide_object in new_ide_objects:
-        object_instance_found = False
-        
-        for inst_object in new_inst_objects:
-            if ide_object.obj_id == inst_object.obj_id and ide_object.model == inst_object.model:
-                object_instance_found = True
-        
-        if not object_instance_found:
-            ide_objects_to_remove.append(ide_object)
-            print(f'Removing unused object {ide_object.obj_id}, {ide_object.model} from {ide_object.file_name}')
-        
-    # Remove undeclared INST objects
-    for inst_object in new_inst_objects:
-        object_declaration_found = False
-        
-        for ide_object in new_ide_objects:
-            if inst_object.obj_id == ide_object.obj_id and inst_object.model == ide_object.model:
-                object_declaration_found = True
-        
-        if not object_declaration_found:
-            inst_objects_to_remove.append(inst_object)
-            print(f'Removing undeclared object {inst_object.obj_id}, {inst_object.model} from {inst_object.file_name}')
-            
-            if inst_object.lod > -1:
-                lod_object = next((obj for obj in new_inst_objects if (inst_object.lod == obj.line_position and inst_object.file_name == obj.file_name)), None)
-                
-                if lod_object is not None:
-                    # In case it's an undeclared main object, also remove its LOD object
-                    inst_objects_to_remove.append(lod_object)
-                    print(f'Removing LOD object {str(lod_object.obj_id)}, {lod_object.model} of undeclared object {str(inst_object.obj_id)}, {inst_object.model} from {lod_object.file_name}')
-                    
-            elif inst_object.lod == -1:
-                main_object = next((obj for obj in new_inst_objects if inst_object.line_position == obj.lod and inst_object.file_name == obj.file_name), None)
-                
-                if main_object is not None:
-                    # In case it's an undeclared LOD object, update its main object LOD
-                    modified_main_object = main_object
-                    modified_main_object.lod = -1
-                    
-                    inst_main_objects_to_modify[main_object] = modified_main_object
-                    print(f'Updating {str(main_object.obj_id)}, {main_object.model} LOD to -1 due to its undeclared LOD object {str(inst_object.obj_id)}, {inst_object.model} removal ({main_object.file_name})')
-                    
-    # Update LOD value for main objects whose LOD objects had their line positions changed due to removal of other objects
-    if inst_objects_to_remove:
-        inst_objects_to_remove_aux = inst_objects_to_remove
-        
-        for inst_object in new_inst_objects:
-            if inst_object.lod > -1:
-                # Count the amount of removed objects positioned at or above the current main object's LOD
-                impactful_removed_objects_count = 0
-                
-                for inst_object_to_remove in inst_objects_to_remove_aux:
-                    if (inst_object_to_remove.file_name == inst_object.file_name and
-                        ((inst_object.line_position < inst_object_to_remove.line_position < inst_object.lod) or
-                        (inst_object_to_remove.line_position < inst_object.line_position < inst_object.lod) or
-                        (inst_object_to_remove.line_position < inst_object.lod < inst_object.line_position))):
-                        impactful_removed_objects_count += 1
-                        
-                if (impactful_removed_objects_count > 0):
-                    # Decrease this amount from the current object's LOD
-                    modified_inst_object = copy.copy(inst_object)
-                    modified_inst_object.lod = inst_object.lod - impactful_removed_objects_count
-                    print(f"{str(inst_object.obj_id)},{inst_object.model} LOD adjusted from {str(inst_object.lod)} to {str(modified_inst_object.lod)} ({inst_object.file_name})")
-                    
-                    inst_main_objects_to_modify[inst_object] = modified_inst_object
-
-def update_id(gta_object):
-    global vanilla_objects
-    global free_ids
-    
-    gta_object.line = gta_object.formated_line()
-    line_was_corrected = False
-    
-    for vanilla_object_id, vanilla_object_model in vanilla_objects.items():
-        # If the object model is a vanilla model,
-        if gta_object.model == vanilla_object_model:
-            # and it uses the same ID,
-            if gta_object.obj_id == int(vanilla_object_id):
-                if not isinstance(gta_object, Inst):
-                    # remove the object declaration, in case it's an IDE file
-                    gta_object.line = f'# removed vanilla object declaration ({str(gta_object.obj_id)}, {gta_object.model})'
-                    print(f'Removing vanilla object {str(gta_object.obj_id)}, {gta_object.model} declaration ({gta_object.file_name})')
-
-            # and it uses a wrong ID,
-            else:
-                # remove the object declaration, in case it's an IDE file
-                if not isinstance(gta_object, Inst):
-                    gta_object.line = f'# removed vanilla object declaration with wrong ID ({str(gta_object.obj_id)}, {gta_object.model})'
-                    print(f'Removing vanilla object {str(gta_object.obj_id)}, {gta_object.model} declaration with wrong ID ({gta_object.file_name})')
-                # correct the ID, in case it's an IPL file
-                else:
-                    gta_object = replace_id(gta_object, vanilla_object_id)
-                    
-            line_was_corrected = True
-            break
-    
-    if not line_was_corrected:
-        # If the object model isn't a vanilla model, give it a new ID
-        gta_object = replace_id(gta_object, free_ids[0])
-        
-    return gta_object
-
-def move_coordinates(gta_object):
-    gta_object.line = gta_object.formated_line()
-    gta_object.move_coordinates(map_command_x, map_command_y, map_command_z)
-    
-    return gta_object
-
-def replace_id(gta_object, new_id):
-    global free_ids
-    global replaced_ids
-    global ids_in_use
-    
-    if gta_object.obj_id in replaced_ids:
-        gta_object.obj_id = replaced_ids[gta_object.obj_id]
-    else:
-        replaced_ids[gta_object.obj_id] = new_id
-        gta_object.obj_id = new_id
-        
-        if new_id in free_ids:
-            ids_in_use.append(new_id)
-            free_ids.remove(new_id)
-        
-    return gta_object
+inst_binary_objects = []
+inst_total_objects = []
+coordinate_objects = []
 
 def get_vanilla_objects():
-    lines = read_file(VANILLA_OBJECTS_FILE_PATH)
     global vanilla_objects
     
-    for line in lines:
+    file_encoding = detect_file_encoding(VANILLA_OBJECTS_FILE_PATH)
+    file_content = read_file(VANILLA_OBJECTS_FILE_PATH, file_encoding)
+    
+    for line in file_content:
         elements = [element.strip().lower() for element in line.split(',')]
-        vanilla_object_id = elements[0]
+        vanilla_object_id = int(elements[0])
         vanilla_object_model = elements[1]
 
         vanilla_objects[vanilla_object_id] = vanilla_object_model
-        
-    return vanilla_objects
-        
-def get_ids_in_use():
-    if os.path.exists(IDS_IN_USE_FILE_PATH) and os.path.getsize(IDS_IN_USE_FILE_PATH) > 0:
-        lines = read_file(IDS_IN_USE_FILE_PATH)
-        global ids_in_use
-        
-        for line in lines:
-            line = line.strip()
-            
-            if line.isdigit():
-                ids_in_use.append(int(line))
-            elif '-' in line:
-                line_parts = line.split('-')
-                first_id = int(line_parts[0].strip())
-                last_part = line_parts[1].strip()
-                
-                if any(not char.isdigit() for char in last_part):
-                    delimiter = next((char for char in last_part if not char.isdigit()), None)
-                    last_id = int(last_part.split(delimiter)[0].strip())
-                else:
-                    last_id = int(last_part)
-                    
-                ids_in_use = ids_in_use + list(range(first_id, last_id + 1))
-        
-    return ids_in_use
 
 def get_free_ids():
+    global ids_in_use
+    global free_ids
+    
     if os.path.exists(FREE_IDS_FILE_PATH) and os.path.getsize(FREE_IDS_FILE_PATH) > 0:
-        lines = read_file(FREE_IDS_FILE_PATH)
-        global free_ids
-        global ids_in_use
         
-        for line in lines:
+        file_encoding = detect_file_encoding(FREE_IDS_FILE_PATH)
+        file_content = read_file(FREE_IDS_FILE_PATH, file_encoding)
+        
+        for line in file_content:
             if line.startswith('Total Free IDs'):
                 continue
             
@@ -412,39 +92,318 @@ def get_free_ids():
         free_ids = list(range(1, 65531))
         
     ids_in_use = get_ids_in_use()
-    available_ids = [object_id for object_id in free_ids if object_id not in ids_in_use]
-    
-    return available_ids
+    free_ids = [object_id for object_id in free_ids if object_id not in ids_in_use]
 
-def process_file(file_input_path):
-    file_name = os.path.basename(file_input_path)
-    processed_lines = read_file(file_input_path)
+def get_ids_in_use():
+    global ids_in_use
     
-    return processed_lines
+    if os.path.exists(IDS_IN_USE_FILE_PATH) and os.path.getsize(IDS_IN_USE_FILE_PATH) > 0:
+        
+        file_encoding = detect_file_encoding(IDS_IN_USE_FILE_PATH)
+        file_content = read_file(IDS_IN_USE_FILE_PATH, file_encoding)
+        
+        for line in file_content:
+            line = line.strip()
+            
+            if line.isdigit():
+                ids_in_use.append(int(line))
+            elif '-' in line:
+                line_parts = line.split('-')
+                first_id = int(line_parts[0].strip())
+                last_part = line_parts[1].strip()
+                
+                if any(not char.isdigit() for char in last_part):
+                    delimiter = next((char for char in last_part if not char.isdigit()), None)
+                    last_id = int(last_part.split(delimiter)[0].strip())
+                else:
+                    last_id = int(last_part)
+                    
+                ids_in_use = ids_in_use + list(range(first_id, last_id + 1))
+        
+    return ids_in_use
 
-def load_objects_from_files():
+def process_files():
+    read_files()
+    list_objects_to_modify()
+    modify_files()
+    write_files()
+
+def read_files():
+    global files
+    
     for file_name in os.listdir(INPUT_DIR):
-        file_path = os.path.join(INPUT_DIR, file_name)
-        processed_lines = process_file(file_path)
-        load_objects_with_ids(processed_lines, file_name)
+        file_extension = os.path.splitext(file_name)[1][1:].lower()
+        
+        if file_extension in SUPPORTED_FILE_EXTENSIONS:
+            file_path = os.path.join(INPUT_DIR, file_name)
+            file_encoding = detect_file_encoding(file_path)
+            file_content = read_file(file_path, file_encoding)
+            
+            if file_encoding == 'binary':
+                if file_extension == 'ipl':
+                    file = IplBinary(file_name, file_content)
+            else:
+                if file_extension == 'ide':
+                    file = Ide(file_name, file_content)
+                elif file_extension == 'ipl':
+                    file = Ipl(file_name, file_content)
+                    
+            files.append(file)
+            
+def detect_file_encoding(file_path):
+    with open(file_path, 'rb') as f:
+        if f.read(4) == b"bnry":
+            return 'binary'
+        else:
+            f.seek(0)
+            result = chardet.detect(f.read())
+            return result['encoding']
+
+def read_file(file_path, encoding):
+    
+    if encoding == 'binary':
+        with open(file_path, 'rb') as f:
+            return bytearray(f.read())
+    else:
+        with open(file_path, 'r', encoding=encoding) as f:
+            return f.readlines()
+
+def list_objects_to_modify():
+    global ide_objects
+    global inst_objects
+    global inst_binary_objects
+    global inst_total_objects
+    global coordinate_objects
+    
+    ide_objects = []
+    inst_objects = []
+    inst_binary_objects = []
+    inst_total_objects = []
+    coordinate_objects = []
+    
+    for file in files:
+        if isinstance(file, Ide):
+            if file.section_objs:
+                ide_objects.extend(file.section_objs)
+            if file.section_tobj:
+                ide_objects.extend(file.section_tobj)
+            if file.section_anim:
+                ide_objects.extend(file.section_anim)
+        elif isinstance(file, Ipl):
+            if file.section_inst:
+                inst_objects.extend(file.section_inst)
+                coordinate_objects.extend(file.section_inst)
+            if file.section_auzo:
+                coordinate_objects.extend(file.section_auzo)
+            if file.section_cars:
+                coordinate_objects.extend(file.section_cars)
+            if file.section_cull:
+                coordinate_objects.extend(file.section_cull)
+            if file.section_enex:
+                coordinate_objects.extend(file.section_enex)
+            if file.section_grge:
+                coordinate_objects.extend(file.section_grge)
+            if file.section_jump:
+                coordinate_objects.extend(file.section_jump)
+            if file.section_occl:
+                coordinate_objects.extend(file.section_occl)
+            if file.section_pick:
+                coordinate_objects.extend(file.section_pick)
+            if file.section_tcyc:
+                coordinate_objects.extend(file.section_tcyc)
+        elif isinstance(file, IplBinary):
+            if file.section_inst:
+                inst_binary_objects.extend(file.section_inst)
+                coordinate_objects.extend(file.section_inst)
+            if file.section_cars:
+                coordinate_objects.extend(file.section_cars)
+                
+    inst_total_objects = inst_objects + inst_binary_objects
 
 def modify_files():
-    for file_name in os.listdir(INPUT_DIR):
-        file_path = os.path.join(INPUT_DIR, file_name)
-        processed_lines = process_file(file_path)
-        modified_file = modify_lines(processed_lines, file_name)
-        save_modified_file(modified_file, file_path, OUTPUT_DIR)
+    global fix_command
+    global id_command
+    global map_command
+    
+    if fix_command:
+        remove_unreferenced_objects()
+    if id_command:
+        update_ids()
+    if map_command:
+        modify_coordinates()
 
-def save_modified_file(modified_lines, original_filepath, output_dir='modified_files'):
-    original_filename = os.path.basename(original_filepath)
-    modified_filepath = os.path.join(output_dir, original_filename)
-    os.makedirs(output_dir, exist_ok=True)
+    return
+
+def remove_unreferenced_objects():
+    global files
+    global ide_objects
+    global inst_objects
+    global inst_binary_objects
     
-    with open(modified_filepath, 'w', encoding='utf-8') as modified_file:
-        modified_file.write('\n'.join(modified_lines))
+    correct_inst_binary_models()
+    vanilla_ids = set(vanilla_objects.keys())
     
-    print(f"Saved {original_filename} at: {modified_filepath}")
+    # Identify undeclared IPL and IPL Binary objects
+    ide_ids = {gta_object.obj_id for gta_object in ide_objects}
     
+    for inst_object in chain(inst_objects, inst_binary_objects):
+        if inst_object.obj_id not in ide_ids and inst_object.obj_id not in vanilla_ids:
+            print(f"({inst_object.file_name}) [{inst_object.obj_id},{inst_object.model}] not found in any IDE or in vanilla objects")
+        elif inst_object.obj_id not in ide_ids and inst_object.obj_id in vanilla_ids and inst_object.model.lower() != vanilla_objects[inst_object.obj_id].lower():
+            print(f"Different model used: ({inst_object.file_name}) [{inst_object.obj_id},{inst_object.model}] x [{inst_object.obj_id},{vanilla_objects[inst_object.obj_id]}] (Vanilla)")
+
+    undeclared_inst_objects = [gta_object for gta_object in inst_objects if gta_object.obj_id not in ide_ids and gta_object.obj_id not in vanilla_ids]
+    undeclared_inst_binary_objects = [gta_object for gta_object in inst_binary_objects if gta_object.obj_id not in ide_ids and gta_object.obj_id not in vanilla_ids]
+    total_undeclared_inst_objects = undeclared_inst_objects + undeclared_inst_binary_objects
+
+    if total_undeclared_inst_objects:
+        for undeclared_inst_object in total_undeclared_inst_objects:
+            file = undeclared_inst_object.file
+            if isinstance(file, Ipl):
+                file.remove_from_section_inst(undeclared_inst_object)
+                inst_objects.remove(undeclared_inst_object)
+            elif isinstance(file, IplBinary):
+                file.section_inst.remove(undeclared_inst_object)
+                inst_binary_objects.remove(undeclared_inst_object)
+
+    # Identify unused IDE objects
+    total_inst_ids = {gta_object.obj_id for gta_object in inst_objects} | {gta_object.obj_id for gta_object in inst_binary_objects}
+    
+    for ide_object in ide_objects:
+        if ide_object.obj_id not in total_inst_ids and ide_object.obj_id not in vanilla_ids:
+            print(f"({ide_object.file_name}) [{ide_object.obj_id},{ide_object.model}] not found in any IPL or in vanilla objects")
+        elif ide_object.obj_id not in total_inst_ids and ide_object.obj_id in vanilla_ids and ide_object.model.lower() != vanilla_objects[ide_object.obj_id].lower():
+            print(f"Different model used: ({ide_object.file_name}) [{ide_object.obj_id},{ide_object.model}] x [{ide_object.obj_id},{vanilla_objects[ide_object.obj_id]}] (Vanilla)")
+    
+    unused_ide_objects = [gta_object for gta_object in ide_objects if gta_object.obj_id not in total_inst_ids]
+    
+    if unused_ide_objects:
+        for unused_ide_object in unused_ide_objects:
+            file = unused_ide_object.file
+            if isinstance(unused_ide_object, Objs):
+                file.section_objs.remove(unused_ide_object)
+            elif isinstance(unused_ide_object, Tobj):
+                file.section_tobj.remove(unused_ide_object)
+            elif isinstance(unused_ide_object, Anim):
+                file.section_anim.remove(unused_ide_object)
+                
+def correct_inst_binary_models():
+    global vanilla_objects
+    global ide_objects
+    global inst_binary_objects
+    
+    ide_ids_to_models = {gta_object.obj_id: gta_object.model for gta_object in ide_objects}
+    
+    for inst_binary_object in inst_binary_objects:
+        if inst_binary_object.obj_id in ide_ids_to_models:
+            inst_binary_object.model = ide_ids_to_models[inst_binary_object.obj_id]
+        elif inst_binary_object.obj_id in vanilla_objects:
+            inst_binary_object.model = vanilla_objects[inst_binary_object.obj_id]
+
+def update_ids():
+    global vanilla_objects
+    global free_ids
+    global ide_objects
+    global inst_total_objects
+    
+    list_objects_to_modify()
+    vanilla_models = set(vanilla_objects.values())
+    
+    for gta_object in ide_objects:
+        found_match = False
+        
+        if gta_object.model in vanilla_models:
+            print(f"({gta_object.file_name}) {gta_object.obj_id},{gta_object.model} is a vanilla object - Removing IDE declaration...")
+            file = gta_object.file
+            if isinstance(gta_object, Objs):
+                file.section_objs.remove(gta_object)
+            elif isinstance(gta_object, Tobj):
+                file.section_tobj.remove(gta_object)
+            elif isinstance(gta_object, Anim):
+                file.section_anim.remove(gta_object)
+        else:
+            print(f"({gta_object.file_name}) Giving new ID for {gta_object.obj_id},{gta_object.model}: ", end = '')
+            replace_id(gta_object, free_ids[0])
+            print(f"{gta_object.obj_id}")
+    
+    list_objects_to_modify()
+    ide_models = [gta_object.model for gta_object in ide_objects]
+                
+    for gta_object in inst_total_objects:
+        found_match = False
+        
+        for vanilla_obj_id, vanilla_model in vanilla_objects.items():
+            if (vanilla_obj_id == gta_object.obj_id and 
+                # 1,chair == 1,chair --> Keep it
+                ((vanilla_model.lower() == gta_object.model.lower()) or
+                 # 1,redchair == 1,chair when it has a vanilla substring and is not IDE declared --> Keep it
+                (vanilla_model.lower() in gta_object.model.lower() and gta_object.model.lower() not in ide_models))):
+                found_match = True
+                break
+            # 500,chair == 1,chair --> Get vanilla ID
+            elif (vanilla_model.lower() == gta_object.model.lower() and vanilla_obj_id != gta_object.obj_id):
+                print(f"({gta_object.file_name}) {gta_object.obj_id},{gta_object.model} is a vanilla object - Correcting ID to {vanilla_obj_id}...")
+                replace_id(gta_object, vanilla_obj_id)
+                found_match = True
+                break
+            
+        # Get new ID:
+        # 1,table      != 1,chair
+        # 500,table    != 1,chair
+        # 500,redchair != 1,chair
+        # 1,redchair   != 1,chair if it's IDE declared
+        if not found_match:
+            print(f"({gta_object.file_name}) Giving new ID for {gta_object.obj_id},{gta_object.model}: ", end = '')
+            replace_id(gta_object, free_ids[0])
+            print(f"{gta_object.obj_id}")
+
+def replace_id(gta_object, new_id):
+    global free_ids
+    global replaced_ids
+    global ids_in_use
+    
+    if gta_object.obj_id in replaced_ids:
+        gta_object.obj_id = replaced_ids[gta_object.obj_id]
+    else:
+        replaced_ids[gta_object.obj_id] = new_id
+        gta_object.obj_id = new_id
+        
+        if new_id in free_ids:
+            ids_in_use.append(new_id)
+            free_ids.remove(new_id)
+        
+    return gta_object
+
+def modify_coordinates():
+    global coordinate_objects
+    global map_command_x
+    global map_command_y
+    global map_command_z
+    
+    for gta_object in coordinate_objects:
+        gta_object.move_coordinates(map_command_x, map_command_y, map_command_z)
+        print(f"({gta_object.file_name} - {gta_object.section}) Object {gta_object.index} moved X: {str(map_command_x)}, Y: {str(map_command_y)}, Z: {str(map_command_z)}")
+
+def write_files():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    for file in files:
+        original_filename = file.file_name
+        
+        if isinstance(file, IplBinary):
+            os.makedirs(BINARY_OUTPUT_DIR, exist_ok=True)
+            modified_filepath = os.path.join(BINARY_OUTPUT_DIR, original_filename)
+            
+            with open(modified_filepath, 'wb') as modified_file:
+                modified_file.write(file.write_file_sections())
+        else:
+            modified_filepath = os.path.join(OUTPUT_DIR, original_filename)
+            
+            with open(modified_filepath, 'w', encoding='utf-8') as modified_file:
+                modified_file.write(file.write_file_sections())
+                
+        print(f"Saved {original_filename} at: {modified_filepath}")
+
 def save_ids_in_use_file():
     global ids_in_use
     ids_in_use_to_be_saved = [str(id) for id in ids_in_use]
@@ -453,7 +412,7 @@ def save_ids_in_use_file():
         ids_in_use_file.write('\n'.join(ids_in_use_to_be_saved))
     
     print(f"Updated IDs in use at: {IDS_IN_USE_FILE_PATH}")
-#endregion
+
 
 #region Main
 if __name__ == '__main__':
@@ -472,9 +431,10 @@ if __name__ == '__main__':
     map_command_z = args.map[2] if map_command else None
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    vanilla_objects = get_vanilla_objects()
-    free_ids = get_free_ids()
-    load_objects_from_files()
-    modify_files()
+    
+    get_vanilla_objects()
+    get_free_ids()
+    process_files()
     save_ids_in_use_file()
+    print('Finished processing files!')
 #endregion
