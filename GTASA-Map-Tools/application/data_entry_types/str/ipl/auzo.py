@@ -17,7 +17,7 @@ class Auzo(DataEntryStr):
         self._y1_pos = float(elements[self.Y1_POS_INDEX])
         self._z1_pos = float(elements[self.Z1_POS_INDEX])
         
-        if (elements.len() > 7):
+        if (len(elements) > 7):
             self._x2_pos = float(elements[self.X2_POS_INDEX])
             self._y2_pos = float(elements[self.Y2_POS_INDEX])
             self._z2_pos = float(elements[self.Z2_POS_INDEX])
@@ -87,7 +87,7 @@ class Auzo(DataEntryStr):
         self.y1_pos += y
         self.z1_pos += z
         
-        if (elements.len() > 7):
+        if len(elements) > 7:
             self.x2_pos += x
             self.y2_pos += y
             self.z2_pos += z

@@ -65,7 +65,7 @@ class Inst(DataEntryStr):
     
     def remove_lod(self):
         if self.has_lod:
-            self.has_lod = False
+            self._has_lod = False
             self.internal_lod_id = None
             self.lod = -1
 
@@ -165,7 +165,22 @@ class Inst(DataEntryStr):
         self.z_pos += z
         
     def move_rotations(self, x, y, z, w):
-        self.x_rot += x
-        self.y_rot += y
-        self.z_rot += z
-        self.w_rot += w
+        x1 = self.x_rot
+        y1 = self.y_rot
+        z1 = self.z_rot
+        w1 = self.w_rot
+        
+        x2 = x
+        y2 = y
+        z2 = z
+        w2 = w
+        
+        new_x_rot = (w1 * x2) + (x1 * w2) + (y1 * z2) - (z1 * y2)
+        new_y_rot = (w1 * y2) - (x1 * z2) + (y1 * w2) + (z1 * x2)
+        new_z_rot = (w1 * z2) + (x1 * y2) - (y1 * x2) + (z1 * w2)
+        new_w_rot = (w1 * w2) - (x1 * x2) - (y1 * y2) - (z1 * z2)
+        
+        self.x_rot = new_x_rot
+        self.y_rot = new_y_rot
+        self.z_rot = new_z_rot
+        self.w_rot = new_w_rot

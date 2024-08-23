@@ -1,4 +1,5 @@
 from application.data_entry_types.binary.data_entry_binary import DataEntryBinary
+import uuid
 
 class InstBinary(DataEntryBinary):
     
@@ -16,6 +17,7 @@ class InstBinary(DataEntryBinary):
         super().__init__(content, index, section, file)
         elements = super().get_content_elements()
 
+        self._internal_id = uuid.uuid4()
         self._model = 'dummy'
         self._x_pos = super().to_float(elements[self.X_POS_INDEX])
         self._y_pos = super().to_float(elements[self.Y_POS_INDEX])
@@ -26,6 +28,10 @@ class InstBinary(DataEntryBinary):
         self._w_rot = super().to_float(elements[self.W_ROT_INDEX])
         self._obj_id = super().to_int(elements[self.ID_INDEX])
         self._lod = super().to_int(elements[self.LOD_INDEX])
+    
+    @property
+    def internal_id(self):
+        return self._internal_id
     
     @property
     def model(self):
@@ -123,7 +129,22 @@ class InstBinary(DataEntryBinary):
         self.z_pos += z
         
     def move_rotations(self, x, y, z, w):
-        self.x_rot += x
-        self.y_rot += y
-        self.z_rot += z
-        self.w_rot += w
+        x1 = self.x_rot
+        y1 = self.y_rot
+        z1 = self.z_rot
+        w1 = self.w_rot
+        
+        x2 = x
+        y2 = y
+        z2 = z
+        w2 = w
+        
+        new_x_rot = (w1 * x2) + (x1 * w2) + (y1 * z2) - (z1 * y2)
+        new_y_rot = (w1 * y2) - (x1 * z2) + (y1 * w2) + (z1 * x2)
+        new_z_rot = (w1 * z2) + (x1 * y2) - (y1 * x2) + (z1 * w2)
+        new_w_rot = (w1 * w2) - (x1 * x2) - (y1 * y2) - (z1 * z2)
+        
+        self.x_rot = new_x_rot
+        self.y_rot = new_y_rot
+        self.z_rot = new_z_rot
+        self.w_rot = new_w_rot

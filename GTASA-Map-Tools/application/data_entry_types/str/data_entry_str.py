@@ -3,16 +3,29 @@ import re
 from application.data_entry_types.data_entry import DataEntry
 
 class DataEntryStr(DataEntry):
-    IDE_SECTIONS = ['objs', 'tobj', 'anim', 'path', '2dfx', 'txdp', 'hier']
+    IDE_SECTIONS = ['objs', 'tobj', 'anim', 'path', '2dfx', 'txdp', 'cars','hier', 'peds', 'weap']
     IPL_SECTIONS = ['inst', 'cull', 'grge', 'enex', 'pick', 'jump', 'tcyc', 'auzo', 'cars', 'occl', 'path', 'mult']
     DATA_ENTRY_FINALIZER = 'end'
-    COMMENT_STARTER = '#'
+    COMMENT_STARTERS = ('#', ';')
 
     def __init__(self, content, index, section, file):
         super().__init__(content, index, section, file)
 
     def get_content_elements(self):
-        elements = [element.strip().lower() for element in re.split(r',\s*|\s(?![,\s])', self.content.strip().lower())]
+        if ',' in self.content:
+            
+            temporary_elements = re.split(r',\s*', self.content.strip().lower())
+            elements = []
+            
+            for element in temporary_elements:
+                if element != '':
+                    if ' ' not in element:
+                        elements.append(element)
+                    else:
+                        subelements = re.findall(r'[a-zA-Z_]\w*|\d+\.\d+e[+-]?\d+|\d+\.\d+|\d+|\S+', element)
+                        elements.extend([sub.strip() for sub in subelements if sub.strip()])
+        else:
+            elements = [element.strip().lower() for element in self.content.strip().lower().split() if element.strip()]
         
         return elements
 
@@ -37,7 +50,7 @@ class DataEntryStr(DataEntry):
         return self.formatted_line() == self.DATA_ENTRY_FINALIZER
     
     def is_comment(self):
-        return self.formatted_line().startswith(self.COMMENT_STARTER)
+        return self.formatted_line().startswith(self.COMMENT_STARTERS)
             
     def is_valid_ide_object(self):
         if (not self.is_comment() and not self.is_ide_section_starter() and

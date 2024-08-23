@@ -5,7 +5,7 @@ from application.data_entry_types.str.ipl.cull import Cull
 from application.data_entry_types.str.ipl.grge import Grge
 from application.data_entry_types.str.ipl.enex import Enex
 from application.data_entry_types.str.ipl.pick import Pick
-from application.data_entry_types.str.ipl.cars import Cars
+from application.data_entry_types.str.ipl.cars_ipl import CarsIpl
 from application.data_entry_types.str.ipl.jump import Jump
 from application.data_entry_types.str.ipl.tcyc import Tcyc
 from application.data_entry_types.str.ipl.auzo import Auzo
@@ -49,16 +49,21 @@ class Ipl(ObjectsFile):
             print(f'Called add_to_section_inst but {inst_object} is not a Inst object.')
             
     def remove_from_section_inst(self, inst_object):
-        if isinstance(inst_object, Inst):
-            if inst_object.has_lod:
-                inst_lod_object = next((gta_object for gta_object in self._section_inst if gta_object.internal_id == inst_object.internal_lod_id), None)
-                self._section_inst.remove(inst_lod_object)
-            elif inst_object.is_lod:
-                inst_main_object = next((gta_object for gta_object in self._section_inst if gta_object.internal_lod_id == inst_object.internal_id), None)
-                inst_main_object.remove_lod()
-                
-            self._section_inst.remove(inst_object)
-            self.update_section_inst_lods()
+        if inst_object in self._section_inst:
+            if isinstance(inst_object, Inst):
+                if inst_object.has_lod:
+                    inst_lod_object = next((gta_object for gta_object in self._section_inst if gta_object.internal_id == inst_object.internal_lod_id), None)
+                    
+                    if inst_lod_object:
+                        self._section_inst.remove(inst_lod_object)
+                elif inst_object.is_lod:
+                    inst_main_object = next((gta_object for gta_object in self._section_inst if gta_object.internal_lod_id == inst_object.internal_id), None)
+                    
+                    if inst_main_object:
+                        inst_main_object.remove_lod()
+                    
+                self._section_inst.remove(inst_object)
+                self.update_section_inst_lods()
             
     def update_section_inst_lods(self):
         ids_to_objects = {gta_object.internal_id: gta_object for gta_object in self._section_inst}
@@ -160,13 +165,13 @@ class Ipl(ObjectsFile):
 
     @section_cars.setter
     def section_cars(self, cars_list):
-        if all(isinstance(cars, Cars) for cars in cars_list):
+        if all(isinstance(cars, CarsIpl) for cars in cars_list):
             self._section_cars = cars_list
         else:
             print(f'Called section_cars setter but {cars_list} is not a list of Cars.')
             
     def add_to_section_cars(self, cars_object):
-        if isinstance(cars_object, Cars):
+        if isinstance(cars_object, CarsIpl):
             self._section_cars.append(cars_object)
         else:
             print(f'Called add_to_section_cars but {cars_object} is not a Cars object.')
@@ -307,7 +312,7 @@ class Ipl(ObjectsFile):
                     gta_object = Cull(*data_entry.get_attributes())
                     self.add_to_section_cull(gta_object)
                 elif current_section == 'path':
-                    self.add_to_section_cull(data_entry)
+                    self.add_to_section_path(data_entry)
                 elif current_section == 'grge':
                     gta_object = Grge(*data_entry.get_attributes())
                     self.add_to_section_grge(gta_object)
@@ -318,8 +323,8 @@ class Ipl(ObjectsFile):
                     gta_object = Pick(*data_entry.get_attributes())
                     self.add_to_section_pick(gta_object)
                 elif current_section == 'cars':
-                    gta_object = Cars(*data_entry.get_attributes())
-                    self.add_to_section_jump(gta_object)
+                    gta_object = CarsIpl(*data_entry.get_attributes())
+                    self.add_to_section_cars(gta_object)
                 elif current_section == 'jump':
                     gta_object = Jump(*data_entry.get_attributes())
                     self.add_to_section_jump(gta_object)

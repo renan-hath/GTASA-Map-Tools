@@ -3,6 +3,11 @@ from application.data_entry_types.str.ide.objs import Objs
 from application.data_entry_types.str.ide.tobj import Tobj
 from application.data_entry_types.str.ide.anim import Anim
 from application.data_entry_types.str.data_entry_str import DataEntryStr
+from application.data_entry_types.str.ide.cars_ide import CarsIde
+from application.data_entry_types.str.ide.hier import Hier
+from application.data_entry_types.str.ide.peds import Peds
+from application.data_entry_types.str.ide.weap import Weap
+from application.data_entry_types.str.ide.txdp import Txdp
 
 class Ide(ObjectsFile):
     
@@ -112,16 +117,16 @@ class Ide(ObjectsFile):
 
     @section_txdp.setter
     def section_txdp(self, txdp_list):
-        if all(isinstance(txdp, DataEntryStr) for txdp in txdp_list):
+        if all(isinstance(txdp, Txdp) for txdp in txdp_list):
             self._section_txdp = txdp_list
         else:
-            print(f'Called section_txdp setter but {txdp_list} is not a list of DataEntryStr.')
+            print(f'Called section_txdp setter but {txdp_list} is not a list of Txdp.')
             
     def add_to_section_txdp(self, txdp_object):
-        if isinstance(txdp_object, DataEntryStr):
+        if isinstance(txdp_object, Txdp):
             self._section_txdp.append(txdp_object)
         else:
-            print(f'Called add_to_section_txdp but {txdp_object} is not a DataEntryStr object.')
+            print(f'Called add_to_section_txdp but {txdp_object} is not a Txdp object.')
             
     @property
     def section_cars(self):
@@ -129,16 +134,16 @@ class Ide(ObjectsFile):
 
     @section_cars.setter
     def section_cars(self, cars_list):
-        if all(isinstance(cars, DataEntryStr) for cars in cars_list):
+        if all(isinstance(cars, CarsIde) for cars in cars_list):
             self._section_cars = cars_list
         else:
-            print(f'Called section_cars setter but {cars_list} is not a list of DataEntryStr.')
+            print(f'Called section_cars setter but {cars_list} is not a list of CarsIde.')
             
     def add_to_section_cars(self, cars_object):
-        if isinstance(cars_object, DataEntryStr):
+        if isinstance(cars_object, CarsIde):
             self._section_cars.append(cars_object)
         else:
-            print(f'Called add_to_section_cars  but {cars_object} is not a DataEntryStr object.')
+            print(f'Called add_to_section_cars but {cars_object} is not a CarsIde object.')
             
     @property
     def section_hier(self):
@@ -146,16 +151,16 @@ class Ide(ObjectsFile):
 
     @section_hier.setter
     def section_hier(self, hier_list):
-        if all(isinstance(hier, DataEntryStr) for hier in hier_list):
+        if all(isinstance(hier, Hier) for hier in hier_list):
             self._section_hier = hier_list
         else:
-            print(f'Called section_hier setter but {hier_list} is not a list of DataEntryStr.')
+            print(f'Called section_hier setter but {hier_list} is not a list of Hier.')
             
     def add_to_section_hier(self, hier_object):
-        if isinstance(hier_object, DataEntryStr):
+        if isinstance(hier_object, Hier):
             self._section_hier.append(hier_object)
         else:
-            print(f'Called add_to_section_hier  but {hier_object} is not a DataEntryStr object.')
+            print(f'Called add_to_section_hier but {hier_object} is not a Hier object.')
             
     @property
     def section_peds(self):
@@ -163,16 +168,16 @@ class Ide(ObjectsFile):
 
     @section_peds.setter
     def section_peds(self, peds_list):
-        if all(isinstance(peds, DataEntryStr) for peds in peds_list):
+        if all(isinstance(peds, Peds) for peds in peds_list):
             self._section_peds = peds_list
         else:
-            print(f'Called section_peds setter but {peds_list} is not a list of DataEntryStr.')
+            print(f'Called section_peds setter but {peds_list} is not a list of Peds.')
             
     def add_to_section_peds(self, peds_object):
-        if isinstance(peds_object, DataEntryStr):
+        if isinstance(peds_object, Peds):
             self._section_peds.append(peds_object)
         else:
-            print(f'Called add_to_section_peds  but {peds_object} is not a DataEntryStr object.')
+            print(f'Called add_to_section_peds but {peds_object} is not a Peds object.')
             
     @property
     def section_weap(self):
@@ -180,16 +185,16 @@ class Ide(ObjectsFile):
 
     @section_weap.setter
     def section_weap(self, weap_list):
-        if all(isinstance(weap, DataEntryStr) for weap in weap_list):
+        if all(isinstance(weap, Weap) for weap in weap_list):
             self._section_weap = weap_list
         else:
-            print(f'Called section_weap setter but {weap_list} is not a list of DataEntryStr.')
+            print(f'Called section_weap setter but {weap_list} is not a list of Weap.')
             
     def add_to_section_weap(self, weap_object):
-        if isinstance(weap_object, DataEntryStr):
+        if isinstance(weap_object, Weap):
             self._section_weap.append(weap_object)
         else:
-            print(f'Called add_to_section_weap  but {weap_object} is not a DataEntryStr object.')
+            print(f'Called add_to_section_weap but {weap_object} is not a Weap object.')
             
     def read_file_sections(self):
         current_section = None
@@ -232,15 +237,20 @@ class Ide(ObjectsFile):
                 elif (current_section == '2dfx'):
                     self.add_to_section_2dfx(data_entry)
                 elif (current_section == 'txdp'):
-                    self.add_to_section_txdp(data_entry)
+                    gta_object = Txdp(*data_entry.get_attributes())
+                    self.add_to_section_txdp(gta_object)
                 elif (current_section == 'cars'):
-                    self.add_to_section_cars(data_entry)
+                    gta_object = CarsIde(*data_entry.get_attributes())
+                    self.add_to_section_cars(gta_object)
                 elif (current_section == 'hier'):
-                    self.add_to_section_hier(data_entry)
+                    gta_object = Hier(*data_entry.get_attributes())
+                    self.add_to_section_hier(gta_object)
                 elif (current_section == 'peds'):
-                    self.add_to_section_peds(data_entry)
+                    gta_object = Peds(*data_entry.get_attributes())
+                    self.add_to_section_peds(gta_object)
                 elif (current_section == 'weap'):
-                    self.add_to_section_weap(data_entry)
+                    gta_object = Weap(*data_entry.get_attributes())
+                    self.add_to_section_weap(gta_object)
                     
     def write_file_sections(self):
         file_content = ''

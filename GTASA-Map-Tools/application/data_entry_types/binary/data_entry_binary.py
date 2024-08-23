@@ -13,6 +13,11 @@ class DataEntryBinary(DataEntry):
     
     def update_content_element(self, element, element_type, element_index):
         elements = self.get_content_elements()
+        
+        if isinstance(element, str):
+            element_type = f'{len(element)}s'
+            element = element.encode('ascii')
+        
         elements[element_index] = struct.pack(element_type, element)
         self._content = b''.join(elements)
         
@@ -21,3 +26,6 @@ class DataEntryBinary(DataEntry):
     
     def to_float(self, element):
         return round(struct.unpack('f', element)[0], 5)
+    
+    def to_str(self, element):
+        return element.decode('utf-8', errors='replace')

@@ -39,12 +39,12 @@ class Jump(DataEntryStr):
         self._z_camera_pos = float(elements[self.Z_CAMERA_POS_INDEX])
 
     @property
-    def _x_start_lower_pos(self):
+    def x_start_lower_pos(self):
         return self._x_start_lower_pos
     
-    @_x_start_lower_pos.setter
-    def _x_start_lower_pos(self, _x_start_lower_pos):
-        self._x_start_lower_pos = _x_start_lower_pos
+    @x_start_lower_pos.setter
+    def x_start_lower_pos(self, x_start_lower_pos):
+        self._x_start_lower_pos = x_start_lower_pos
         super().update_content_element(str(self._x_start_lower_pos), self.X_START_LOWER_POS_INDEX)
     
     @property
