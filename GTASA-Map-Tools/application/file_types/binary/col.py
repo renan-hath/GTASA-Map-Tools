@@ -1,4 +1,3 @@
-from application.file_types.file_reference import FileReference
 from application.data_entry_types.binary.col.col_entry import ColEntry
 from application.file_types.objects_file import ObjectsFile
 
