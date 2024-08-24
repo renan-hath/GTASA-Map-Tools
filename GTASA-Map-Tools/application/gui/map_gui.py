@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import Canvas, Label, Entry, Checkbutton, BooleanVar
+from tkinter import Canvas, Label, Entry, Checkbutton, BooleanVar, OptionMenu, StringVar
 from PIL import Image, ImageTk, ImageDraw
 import math
 import pyperclip
@@ -17,12 +17,25 @@ class MapGui:
         
         self.get_coordinates_func = get_coordinates_func
         self.installed_coordinates = installed_coordinates
-        self.map_size = map_size
+
+        # Initialize the map size variable
+        self.map_size_var = StringVar(value=str(map_size))
+        self.map_size_options = {"6000": "resources/map_6000.png",
+                                 "12000": "resources/map_12000.png",
+                                 "24000": "resources/map_24000.png",
+                                 "48000": "resources/map_48000.png"}
+        
+        # Update map_size based on dropdown selection
+        self.map_size = int(self.map_size_var.get())
         self.canvas_size = 600  # Canvas size in pixels
         self.scale = self.canvas_size / self.map_size
 
         self.canvas = Canvas(root, width=self.canvas_size, height=self.canvas_size, bg='white')
         self.canvas.pack()
+
+        # Add the dropdown menu for map size
+        self.map_size_dropdown = OptionMenu(root, self.map_size_var, *self.map_size_options.keys(), command=self.update_map)
+        self.map_size_dropdown.pack()
 
         self.load_background_image()
         self.create_points_image()
@@ -95,19 +108,23 @@ class MapGui:
 
     def load_background_image(self):
         try:
-            image_path = "resources/map.png"
+            # Get the correct image path based on map size
+            image_path = self.map_size_options[self.map_size_var.get()]
             self.bg_image = Image.open(image_path)
         except FileNotFoundError:
-            try:
-                image_path = "resources/map.jpg"
-                self.bg_image = Image.open(image_path)
-            except FileNotFoundError:
-                self.bg_image = None
+            self.bg_image = None
 
         if self.bg_image:
             self.bg_image = self.bg_image.resize((self.canvas_size, self.canvas_size))
             self.tk_bg_image = ImageTk.PhotoImage(self.bg_image)
             self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_bg_image)
+            
+    def update_map(self, *args):
+        # Update map size and reload the background image
+        self.map_size = int(self.map_size_var.get())
+        self.scale = self.canvas_size / self.map_size
+        self.load_background_image()
+        self.create_points_image()
 
     def create_points_image(self):
         self.points_image = Image.new('RGBA', (self.canvas_size, self.canvas_size), (0, 0, 0, 0))
