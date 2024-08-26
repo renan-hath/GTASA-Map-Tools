@@ -1,8 +1,14 @@
+import os
 import tkinter as tk
 from tkinter import Canvas, Label, Entry, Checkbutton, BooleanVar, OptionMenu, StringVar
 from PIL import Image, ImageTk, ImageDraw
 import math
 import pyperclip
+
+RESOURCES_DIR = "resources"
+SA_PATHS_DATA_EXTENDER_DIR = os.path.join(RESOURCES_DIR, "SAPathsDataExtender")
+SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
+SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
 
 class MapGui:
     def __init__(self, root, get_coordinates_func, installed_coordinates, map_size=6000, args=None):
@@ -61,10 +67,12 @@ class MapGui:
         self.rotation_values = None
         self.fix_command = True
         self.id_command = True
+        self.path_command = False
         
         # Initialize BooleanVars for checkboxes
         self.fix_invalid_var = BooleanVar(value=True)
         self.replace_ids_var = BooleanVar(value=True)
+        self.move_paths_var = BooleanVar(value=False)
 
         # Create checkboxes
         self.checkbox_fix_invalid = Checkbutton(root, text="Fix invalid objects", variable=self.fix_invalid_var)
@@ -72,6 +80,11 @@ class MapGui:
 
         self.checkbox_replace_ids = Checkbutton(root, text="Replace objects IDs", variable=self.replace_ids_var)
         self.checkbox_replace_ids.pack()
+        
+        self.checkbox_move_paths = Checkbutton(root, text="Move paths", variable=self.move_paths_var, command=self.adapt_gui_to_move_paths)
+        self.checkbox_move_paths.pack()
+        self.update_move_paths_checkbox()
+        self.adapt_gui_to_move_paths()
         
         # Initialize values from command line arguments
         if args:
@@ -85,6 +98,31 @@ class MapGui:
                 self.entry_qy.insert(0, f"{args.rot[1]:.2f}")
                 self.entry_qz.insert(0, f"{args.rot[2]:.2f}")
                 self.entry_qw.insert(0, f"{args.rot[3]:.2f}")
+
+    def update_move_paths_checkbox(self):
+        if self.map_size == 24000 and os.path.isfile(SA_PATHS_DATA_EXTENDER_PATH):
+            self.checkbox_move_paths.config(state=tk.NORMAL)
+        else:
+            self.checkbox_move_paths.config(state=tk.DISABLED) 
+            self.move_paths_var.set(False)
+            
+    def adapt_gui_to_move_paths(self):
+        if self.move_paths_var.get():
+            self.path_command = True
+            self.update_offsets_for_paths()
+            self.update_coordinate_labels()
+            self.entry_angle.config(state=tk.DISABLED)
+            self.entry_qx.config(state=tk.DISABLED)
+            self.entry_qy.config(state=tk.DISABLED)
+            self.entry_qz.config(state=tk.DISABLED)
+            self.entry_qw.config(state=tk.DISABLED)
+        else:
+            self.path_command = False
+            self.entry_angle.config(state=tk.NORMAL)
+            self.entry_qx.config(state=tk.NORMAL)
+            self.entry_qy.config(state=tk.NORMAL)
+            self.entry_qz.config(state=tk.NORMAL)
+            self.entry_qw.config(state=tk.NORMAL)
 
     def update_mouse_coordinates(self, event):
         # Get cursor coordinates on screen
@@ -125,6 +163,8 @@ class MapGui:
         self.scale = self.canvas_size / self.map_size
         self.load_background_image()
         self.create_points_image()
+        self.update_move_paths_checkbox()
+        self.adapt_gui_to_move_paths()
 
     def create_points_image(self):
         self.points_image = Image.new('RGBA', (self.canvas_size, self.canvas_size), (0, 0, 0, 0))
@@ -236,17 +276,27 @@ class MapGui:
         self.update_coordinate_labels()
 
     def stop_drag(self, event):
+        # Adjust X and Y offsets in case paths moving is enabled
+        if self.move_paths_var.get():
+            self.update_offsets_for_paths()
+
+        # Update rendered points
+        self.render_points()
+        self.update_coordinate_labels()
+
+        # Reset drag start coordinates
         self.start_x = 0
         self.start_y = 0
 
     def adjust_rotation(self, event):
-        # Scroll up: increase angle; Scroll down: decrease angle
-        delta = -event.delta if event.delta else event.delta  # Handle delta sign (positive/negative) based on platform
-        self.rotation_angle = (self.rotation_angle + delta / 120) % 360  # 120 is a common scroll delta step
-        self.create_points_image()  # Recreate points image with the new rotation
-        self.render_points()
-        self.update_rotation_label()
-        self.update_quaternion_labels()
+        if not self.move_paths_var.get():
+            # Scroll up: increase angle; Scroll down: decrease angle
+            delta = -event.delta if event.delta else event.delta  # Handle delta sign (positive/negative) based on platform
+            self.rotation_angle = (self.rotation_angle + delta / 120) % 360  # 120 is a common scroll delta step
+            self.create_points_image()  # Recreate points image with the new rotation
+            self.render_points()
+            self.update_rotation_label()
+            self.update_quaternion_labels()
 
     def rotate_point(self, x, y):
         radians = math.radians(self.rotation_angle)
@@ -257,6 +307,10 @@ class MapGui:
         new_x = x * cos_a - y * sin_a
         new_y = x * sin_a + y * cos_a
         return new_x, new_y
+
+    def update_offsets_for_paths(self):
+        self.offset_x = round(self.offset_x / 750) * 750
+        self.offset_y = round(self.offset_y / 750) * 750
 
     def update_coordinate_labels(self):
         self.entry_x.delete(0, tk.END)
@@ -272,6 +326,11 @@ class MapGui:
         try:
             self.offset_x = float(self.entry_x.get())
             self.offset_y = float(self.entry_y.get())
+            
+            if self.move_paths_var.get():
+                self.update_offsets_for_paths()
+                self.update_coordinate_labels()
+            
             self.render_points()
         except ValueError:
             pass  # Ignore invalid entries
@@ -313,6 +372,7 @@ class MapGui:
         self.rotation_values = self.get_rotation_values()
         self.fix_command = self.fix_invalid_var.get()
         self.id_command = self.replace_ids_var.get()
+        self.path_command = self.move_paths_var.get()
         
         # Close GUI after saving data
         self.root.destroy()

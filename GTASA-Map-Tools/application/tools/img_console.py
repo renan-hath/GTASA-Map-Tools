@@ -10,7 +10,7 @@ class IMGConsole:
     IMG_CONSOLE_NAME = "fastman92ImgConsole32.exe"
     IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
     IMG_CONSOLE_PATH = os.path.join(IMG_CONSOLE_DIR, IMG_CONSOLE_NAME)
-    IMG_CONSOLE_TEMP_DIR = IMG_CONSOLE_DIR + "\\" + "Temp"
+    IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
     
     def __init__(self):
         self.process = None
@@ -21,11 +21,10 @@ class IMGConsole:
     def start(self):
         if not self.process:
             self.process = subprocess.Popen(self.IMG_CONSOLE_PATH, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-            # Inicia um thread para ler o stdout não bloqueante
             self.output_thread = Thread(target=self._enqueue_output, args=(self.process.stdout, self.queue))
-            self.output_thread.daemon = True  # O thread será encerrado quando o programa principal terminar
+            self.output_thread.daemon = True
             self.output_thread.start()
-            time.sleep(1)  # Aguarda o prompt interativo
+            time.sleep(1)
 
     def _enqueue_output(self, out, queue):
         for line in iter(out.readline, ''):
@@ -45,7 +44,6 @@ class IMGConsole:
         
         while total_sleep_time < max_sleep_time:
             try:
-                # Tenta ler da fila sem bloquear
                 output = self.queue.get_nowait()
                 
                 if output.strip():
@@ -66,18 +64,14 @@ class IMGConsole:
             self.process.stdin.write('-exit\n')
             self.process.stdin.flush()
             
-            # Adiciona o comando à fila
             self.queue.put('-exit')
 
-            # Aguarda a saída do comando e o fechamento do processo
             output_list = []
             while True:
                 try:
-                    # Tenta ler da fila sem bloquear
                     output = self.queue.get_nowait()
                     output_list.append(output)
                 except Empty:
-                    # Se a fila estiver vazia, aguarda um pouco e tenta novamente
                     time.sleep(0.1)
                     
                     if not self.process.poll() is None and self.queue.empty():

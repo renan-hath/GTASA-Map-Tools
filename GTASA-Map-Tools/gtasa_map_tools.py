@@ -38,6 +38,7 @@ OUTPUT_DIR = "modified_files"
 OUTPUT_IMG_DIR = os.path.join(OUTPUT_DIR, "img")
 OUTPUT_ASSETS_DIR = os.path.join(OUTPUT_DIR, "assets")
 OUTPUT_MAP_DIR = os.path.join(OUTPUT_DIR, "map")
+OUTPUT_PATHS_DIR = os.path.join(OUTPUT_DIR, "gta3.img")
 RESOURCES_DIR = "resources"
 VANILLA_OBJECTS_FILE_NAME = "vanilla_objects.txt"
 VANILLA_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, VANILLA_OBJECTS_FILE_NAME)
@@ -45,6 +46,11 @@ IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
 IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
 IMG_CONSOLE_NAME = "fastman92ImgConsole32.exe"
 IMG_CONSOLE_PATH = os.path.join(IMG_CONSOLE_DIR, IMG_CONSOLE_NAME)
+SA_PATHS_DATA_EXTENDER_DIR = os.path.join(RESOURCES_DIR, "SAPathsDataExtender")
+SA_PATHS_DATA_EXTENDER_INPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Input")
+SA_PATHS_DATA_EXTENDER_OUTPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Output")
+SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
+SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
 IDE_FILE_EXTENSION = 'ide'
 IPL_FILE_EXTENSION = 'ipl'
 SUPPORTED_FILE_EXTENSIONS = [IDE_FILE_EXTENSION, IPL_FILE_EXTENSION]
@@ -63,6 +69,7 @@ VANILLA_PLACEMENTS_PATH =  os.path.join(RESOURCES_DIR, VANILLA_PLACEMENTS_FILE_N
 #region Global variables
 fix_command = False
 id_command = False
+path_command = False
 map_command = False
 map_command_x = 0
 map_command_y = 0
@@ -176,7 +183,7 @@ def get_ids_in_use():
     return ids_in_use
 
 def process_files():
-    global fix_command, id_command
+    global fix_command, id_command, path_command
     global map_command, map_command_x, map_command_y, map_command_z
     global rot_command,rot_command_x, rot_command_y, rot_command_z, rot_command_w
     
@@ -209,6 +216,11 @@ def process_files():
         id_command = True
     else:
         id_command = False
+        
+    if app.path_command:
+        path_command = True
+    else:
+        path_command = False
         
     uniquify_mod_files()
     read_map_files()
@@ -249,6 +261,15 @@ def detect_file_encoding(file_path):
             f.seek(0)
             result = chardet.detect(f.read())
             return result['encoding']
+        
+def is_fastman_node_format(file_path):
+    with open(file_path, 'rb') as f:
+        bytes_data = f.read(8)
+
+        if len(bytes_data) >= 8 and bytes_data[4:8] == b"FM92":
+            return True
+        else:
+            return False
 
 def read_file(file_path, encoding):
     
@@ -746,6 +767,7 @@ def get_gta_dat_filenames():
     return gta_dat_file_names
 
 def uniquify_mod_files():
+    global path_command
     global object_resources_renames
     global existent_binary_ipl_files
     unpacked_img_directories = []
@@ -755,6 +777,7 @@ def uniquify_mod_files():
     dff_file_paths = []
     txd_file_paths = []
     map_file_paths = []
+    node_file_paths = []
     other_file_paths = []
     
     # Unpack each IMG file
@@ -807,17 +830,31 @@ def uniquify_mod_files():
                             txd_file_paths.append(file_path)
                         elif file.lower().endswith('.ide') or file.lower().endswith('.ipl'):
                             map_file_paths.append(file_path)
+                        elif re.match(r'^nodes\d+\.dat$', file.lower()):
+                            node_file_paths.append(file_path)
                         else:
                             other_file_paths.append(file_path)
-                        
+    
+    # Move every node file to a temporary location
+    if node_file_paths and path_command:
+        if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+            shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+            
+        os.makedirs(SA_PATHS_DATA_EXTENDER_INPUT_DIR, exist_ok=True)
+        
+        for file_path in node_file_paths:
+            shutil.move(file_path, SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+            
+        move_paths()
+    
     # Uniquify every COL file
     for file_path in col_file_paths:
         uniquify_asset_file(file_path)
-        
+    
     # Uniquify every DFF file
     for file_path in dff_file_paths:
         uniquify_asset_file(file_path)
-        
+    
     # Uniquify every TXD file
     for file_path in txd_file_paths:
         uniquify_asset_file(file_path)
@@ -825,7 +862,7 @@ def uniquify_mod_files():
     # Uniquify every other file
     for file_path in other_file_paths:
         uniquify_asset_file(file_path)
-        
+    
     # Uniquify and move every leftover map file
     for file_path in map_file_paths:
         uniquified_file_path = uniquify_asset_file(file_path)
@@ -859,6 +896,43 @@ def uniquify_mod_files():
             for file in files:
                 file_path = os.path.join(root, file)
                 uniquify_map_file(file_path)
+
+def move_paths():
+    global map_command_x
+    global map_command_y
+    global map_command_z
+    
+    for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+        node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_INPUT_DIR, node_file)
+        
+        if is_vanilla_file(node_file_path) or is_fastman_node_format(node_file_path):
+            os.remove(node_file_path)
+            
+    if any(os.scandir(SA_PATHS_DATA_EXTENDER_INPUT_DIR)):
+        if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+            shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+            
+        if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
+            shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
+            
+        os.makedirs(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, exist_ok=True)
+        pathsExtender = SAPathsDataExtender()
+        paths_moved = pathsExtender.run(map_command_x, map_command_y, map_command_z)
+        
+        if paths_moved:
+            os.makedirs(OUTPUT_PATHS_DIR, exist_ok=True)
+            
+        for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
+            node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, node_file)
+            
+            if os.path.isfile(node_file_path):
+                shutil.move(node_file_path, os.path.join(OUTPUT_PATHS_DIR, node_file))
+            
+        if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+            shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+            
+        if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
+            shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
 
 def uniquify_map_objects():
     for file in mod_map_files:
@@ -1054,8 +1128,8 @@ def is_vanilla_file(file_path):
     
     if file_name in vanilla_files:
         # A COL file should be considered vanilla only if it is identical, as it might have the same name
-        # but contain new models
-        if file_type == '.col':
+        # but contain new models. Same for NODES.DAT files, that might be new but can still be using vanilla names.
+        if file_type == '.col' or re.match(r'^nodes\d+\.dat$', file_name.lower()):
             if ((isinstance(vanilla_files[file_name], list) and file_size in vanilla_files[file_name]) or 
                 file_size == vanilla_files[file_name]):
                     return True
@@ -1335,6 +1409,8 @@ from application.data_entry_types.str.ide.hier import Hier
 from application.data_entry_types.str.ide.peds import Peds
 from application.data_entry_types.str.ide.weap import Weap
 from application.data_entry_types.str.ide.txdp import Txdp
+from application.tools.sa_paths_data_extender import SAPathsDataExtender
+from gtasa_map_tools import map_command_x
 
 def read_installed_placement_files():
     mods_placement_files = {}
@@ -1518,11 +1594,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = 'GTASA Map Tools')
     parser.add_argument('-fix', action='store_true', help='Remove unused game objects')
     parser.add_argument('-id', action='store_true', help='Replace game objects IDs')
+    parser.add_argument('-path', action='store_true', help='Move paths')
     parser.add_argument('-map', nargs = 3, metavar=('X', 'Y', 'Z'), type = float, help = 'Move game objects coordinates')
     parser.add_argument('-rot', nargs = 4, metavar=('X', 'Y', 'Z', 'W'), type = float, help = 'Rotate game objects coordinates')
     args = parser.parse_args()
     fix_command = args.fix
     id_command = args.id
+    path_command = args.path
     map_command = args.map is not None
     map_command_x = args.map[0] if map_command else None
     map_command_y = args.map[1] if map_command else None
