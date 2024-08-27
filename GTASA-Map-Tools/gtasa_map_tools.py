@@ -8,29 +8,38 @@ import stat
 import string
 from itertools import chain
 from pathlib import Path
+
 import chardet
-import unidecode
 import tkinter as tk
-from application.file_types.str.ide import Ide
-from application.file_types.str.ipl import Ipl
-from application.file_types.binary.ipl_binary import IplBinary
-from application.file_types.binary.col import Col
+import unidecode
+
 from application.data_entry_types.str.ide.anim import Anim
+from application.data_entry_types.str.ide.cars_ide import CarsIde
+from application.data_entry_types.str.ide.hier import Hier
 from application.data_entry_types.str.ide.objs import Objs
+from application.data_entry_types.str.ide.peds import Peds
 from application.data_entry_types.str.ide.tobj import Tobj
+from application.data_entry_types.str.ide.txdp import Txdp
+from application.data_entry_types.str.ide.weap import Weap
 from application.data_entry_types.str.ipl.auzo import Auzo
 from application.data_entry_types.str.ipl.cars_ipl import CarsIpl
 from application.data_entry_types.str.ipl.cull import Cull
 from application.data_entry_types.str.ipl.enex import Enex
 from application.data_entry_types.str.ipl.grge import Grge
 from application.data_entry_types.str.ipl.inst import Inst
-from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.data_entry_types.str.ipl.jump import Jump
 from application.data_entry_types.str.ipl.occl import Occl
 from application.data_entry_types.str.ipl.pick import Pick
 from application.data_entry_types.str.ipl.tcyc import Tcyc
-from application.tools.img_console import IMGConsole
+from application.file_types.binary.col import Col
+from application.file_types.binary.ipl_binary import IplBinary
+from application.file_types.str.dat import Dat
+from application.file_types.str.ide import Ide
+from application.file_types.str.ipl import Ipl
+from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
+from application.tools.img_console import IMGConsole
+from application.tools.sa_paths_data_extender import SAPathsDataExtender
 
 #region Constants
 INPUT_DIR = "files"
@@ -51,9 +60,6 @@ SA_PATHS_DATA_EXTENDER_INPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Inp
 SA_PATHS_DATA_EXTENDER_OUTPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Output")
 SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
 SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
-IDE_FILE_EXTENSION = 'ide'
-IPL_FILE_EXTENSION = 'ipl'
-SUPPORTED_FILE_EXTENSIONS = [IDE_FILE_EXTENSION, IPL_FILE_EXTENSION]
 SA_DATA_DIR = "C:\\Games\\GTA San Andreas\\data"
 SA_MODLOADER_DIR = "C:\\Games\\GTA San Andreas\\modloader"
 INVALID_IDS_FILE_NAME = 'invalid_ids.txt'
@@ -63,7 +69,6 @@ VANILLA_FILES_FILE_NAME = "vanilla_files.txt"
 VANILLA_FILES_PATH = os.path.join(RESOURCES_DIR, VANILLA_FILES_FILE_NAME)
 VANILLA_PLACEMENTS_FILE_NAME = "vanilla_placements.txt"
 VANILLA_PLACEMENTS_PATH =  os.path.join(RESOURCES_DIR, VANILLA_PLACEMENTS_FILE_NAME)
-
 #endregion
 
 #region Global variables
@@ -236,22 +241,22 @@ def read_map_files():
     if os.path.exists(OUTPUT_MAP_DIR):
         for file_name in os.listdir(OUTPUT_MAP_DIR):
             file_extension = os.path.splitext(file_name)[1][1:].lower()
+            file_path = os.path.join(OUTPUT_MAP_DIR, file_name)
+            file_encoding = detect_file_encoding(file_path)
+            file_content = read_file(file_path, file_encoding)
             
-            if file_extension in SUPPORTED_FILE_EXTENSIONS:
-                file_path = os.path.join(OUTPUT_MAP_DIR, file_name)
-                file_encoding = detect_file_encoding(file_path)
-                file_content = read_file(file_path, file_encoding)
-                
-                if file_encoding == 'binary':
-                    if file_extension == 'ipl':
-                        file = IplBinary(file_name, file_content)
-                else:
-                    if file_extension == 'ide':
-                        file = Ide(file_name, file_content)
-                    elif file_extension == 'ipl':
-                        file = Ipl(file_name, file_content)
-                        
-                mod_map_files.append(file)
+            if file_encoding == 'binary':
+                if file_extension == 'ipl':
+                    file = IplBinary(file_name, file_content)
+            else:
+                if file_extension == 'ide':
+                    file = Ide(file_name, file_content)
+                elif file_extension == 'ipl':
+                    file = Ipl(file_name, file_content)
+                elif file_name.lower() == 'water.dat':
+                    file = Dat(file_name, file_content)
+                    
+            mod_map_files.append(file)
 
 def detect_file_encoding(file_path):
     with open(file_path, 'rb') as f:
@@ -351,6 +356,8 @@ def list_objects_to_modify():
             if file.section_cars:
                 ipl_objects.extend(file.section_cars)
                 coordinate_objects.extend(file.section_cars)
+        elif isinstance(file, Dat):
+            coordinate_objects.extend(file.section_water)
                 
     inst_total_objects = inst_objects + inst_binary_objects
 
@@ -365,6 +372,7 @@ def modify_map_files():
         update_ids()
     if map_command:
         modify_coordinates()
+        move_paths()
     if rot_command:
         rotate_coordinates()
 
@@ -725,15 +733,9 @@ def copy_files_to_output():
                     
             if is_valid_file:
                 if mod_file.lower().endswith('.img'):
-                    if is_valid_file:
-                        file_output_dir = OUTPUT_IMG_DIR
-                    else:
-                        continue
-                elif ((mod_file.lower().endswith('.ide') or mod_file.lower().endswith('.ipl'))):
-                    if is_valid_file:
-                        file_output_dir = OUTPUT_MAP_DIR
-                    else:
-                        continue
+                    file_output_dir = OUTPUT_IMG_DIR
+                elif (mod_file.lower().endswith('.ide') or mod_file.lower().endswith('.ipl') or mod_file.lower() == 'water.dat'):
+                    file_output_dir = OUTPUT_MAP_DIR
                 else:
                     file_output_dir = OUTPUT_ASSETS_DIR
                     
@@ -836,16 +838,20 @@ def uniquify_mod_files():
                             other_file_paths.append(file_path)
     
     # Move every node file to a temporary location
-    if node_file_paths and path_command:
-        if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-            shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
-            
+    if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+        shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+        
+    if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
+        shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
+        
+    if node_file_paths and map_command and path_command:
         os.makedirs(SA_PATHS_DATA_EXTENDER_INPUT_DIR, exist_ok=True)
         
         for file_path in node_file_paths:
             shutil.move(file_path, SA_PATHS_DATA_EXTENDER_INPUT_DIR)
-            
-        move_paths()
+    else:
+        for file_path in node_file_paths:
+            os.remove(file_path)
     
     # Uniquify every COL file
     for file_path in col_file_paths:
@@ -909,12 +915,6 @@ def move_paths():
             os.remove(node_file_path)
             
     if any(os.scandir(SA_PATHS_DATA_EXTENDER_INPUT_DIR)):
-        if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-            shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
-            
-        if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
-            shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
-            
         os.makedirs(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, exist_ok=True)
         pathsExtender = SAPathsDataExtender()
         paths_moved = pathsExtender.run(map_command_x, map_command_y, map_command_z)
@@ -1403,15 +1403,6 @@ def read_mod_placement_files():
     
     return placement_files
 
-import os
-from application.data_entry_types.str.ide.cars_ide import CarsIde
-from application.data_entry_types.str.ide.hier import Hier
-from application.data_entry_types.str.ide.peds import Peds
-from application.data_entry_types.str.ide.weap import Weap
-from application.data_entry_types.str.ide.txdp import Txdp
-from application.tools.sa_paths_data_extender import SAPathsDataExtender
-from gtasa_map_tools import map_command_x
-
 def read_installed_placement_files():
     mods_placement_files = {}
     
@@ -1577,7 +1568,8 @@ def file_is_empty(file):
         '_section_auzo',
         '_section_mult',
         '_section_occl',
-        '_section_zone'
+        '_section_zone',
+        '_section_water'
     ]
 
     return all(

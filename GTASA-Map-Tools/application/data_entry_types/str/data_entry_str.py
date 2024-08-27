@@ -63,3 +63,7 @@ class DataEntryStr(DataEntry):
             not self.is_section_finalizer() and self.section in self.IPL_SECTIONS and
             len(self.get_content_elements()) > 1):
             return True
+        
+    def is_valid_dat_object(self):
+        if (not self.is_comment() and len(self.get_content_elements()) > 1):
+            return True
