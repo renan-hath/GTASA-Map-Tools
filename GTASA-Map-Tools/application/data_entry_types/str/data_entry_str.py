@@ -9,16 +9,16 @@ class DataEntryStr(DataEntry):
     COMMENT_STARTERS = ('#', ';')
 
     def __init__(self, content, index, section, file):
+        content = content.rstrip('\n')
         super().__init__(content, index, section, file)
 
     def get_content_elements(self):
-        if ',' in self.content:
-            
-            temporary_elements = re.split(r',\s*', self.content.strip().lower())
+        if ',' in self.content or '\t' in self.content:
+            temporary_elements = re.split(r'[\t,]\s*', self.content.strip().lower())
             elements = []
             
             for element in temporary_elements:
-                if element != '':
+                if element and not element.startswith(('<')):
                     if ' ' not in element:
                         elements.append(element)
                     else:

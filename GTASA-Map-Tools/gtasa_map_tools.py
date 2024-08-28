@@ -40,8 +40,11 @@ from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
 from application.tools.img_console import IMGConsole
 from application.tools.sa_paths_data_extender import SAPathsDataExtender
+from application.data_entry_types.str.dat.dat_object import DatObject
 
 #region Constants
+SA_DATA_DIR = "C:\\Games\\GTA San Andreas\\data"
+SA_MODLOADER_DIR = "C:\\Games\\GTA San Andreas\\modloader"
 INPUT_DIR = "files"
 OUTPUT_DIR = "modified_files"
 OUTPUT_IMG_DIR = os.path.join(OUTPUT_DIR, "img")
@@ -49,24 +52,24 @@ OUTPUT_ASSETS_DIR = os.path.join(OUTPUT_DIR, "assets")
 OUTPUT_MAP_DIR = os.path.join(OUTPUT_DIR, "map")
 OUTPUT_PATHS_DIR = os.path.join(OUTPUT_DIR, "gta3.img")
 RESOURCES_DIR = "resources"
-VANILLA_OBJECTS_FILE_NAME = "vanilla_objects.txt"
-VANILLA_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, VANILLA_OBJECTS_FILE_NAME)
 IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
 IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
 IMG_CONSOLE_NAME = "fastman92ImgConsole32.exe"
 IMG_CONSOLE_PATH = os.path.join(IMG_CONSOLE_DIR, IMG_CONSOLE_NAME)
+VANILLA_IMG_FILE_NAMES = ['gta3.img', 'gta_int.img', 'player.img', 'cutscene.img']
 SA_PATHS_DATA_EXTENDER_DIR = os.path.join(RESOURCES_DIR, "SAPathsDataExtender")
 SA_PATHS_DATA_EXTENDER_INPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Input")
 SA_PATHS_DATA_EXTENDER_OUTPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Output")
 SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
 SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
-SA_DATA_DIR = "C:\\Games\\GTA San Andreas\\data"
-SA_MODLOADER_DIR = "C:\\Games\\GTA San Andreas\\modloader"
 INVALID_IDS_FILE_NAME = 'invalid_ids.txt'
 INVALID_IDS_PATH = os.path.join(RESOURCES_DIR, INVALID_IDS_FILE_NAME)
-VANILLA_IMG_FILE_NAMES = ['gta3.img', 'gta_int.img', 'player.img', 'cutscene.img']
 VANILLA_FILES_FILE_NAME = "vanilla_files.txt"
 VANILLA_FILES_PATH = os.path.join(RESOURCES_DIR, VANILLA_FILES_FILE_NAME)
+VANILLA_OBJECTS_FILE_NAME = "vanilla_objects.txt"
+VANILLA_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, VANILLA_OBJECTS_FILE_NAME)
+VANILLA_DAT_OBJECTS_FILE_NAME = "vanilla_dat_objects.txt"
+VANILLA_DAT_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, VANILLA_DAT_OBJECTS_FILE_NAME)
 VANILLA_PLACEMENTS_FILE_NAME = "vanilla_placements.txt"
 VANILLA_PLACEMENTS_PATH =  os.path.join(RESOURCES_DIR, VANILLA_PLACEMENTS_FILE_NAME)
 #endregion
@@ -82,6 +85,7 @@ map_command_z = 0
 
 mod_map_files = []
 vanilla_objects = {}
+vanilla_dat_objects = set()
 vanilla_ids = set()
 vanilla_models = set()
 
@@ -130,6 +134,14 @@ def get_vanilla_objects():
         
     vanilla_ids = set(vanilla_objects.keys())
     vanilla_models = set(vanilla_objects.values())
+    
+def get_vanilla_dat_objects():
+    global vanilla_dat_objects
+    
+    file_encoding = detect_file_encoding(VANILLA_DAT_OBJECTS_FILE_PATH)
+    file_content = read_file(VANILLA_DAT_OBJECTS_FILE_PATH, file_encoding)
+    
+    vanilla_dat_objects = {line.strip() for line in file_content}
 
 def get_free_ids():
     global free_ids
@@ -253,7 +265,8 @@ def read_map_files():
                     file = Ide(file_name, file_content)
                 elif file_extension == 'ipl':
                     file = Ipl(file_name, file_content)
-                elif file_name.lower() == 'water.dat':
+                elif (file_name.lower() == 'water.dat' or
+                      file_name.lower() == 'object.dat'):
                     file = Dat(file_name, file_content)
                     
             mod_map_files.append(file)
@@ -734,7 +747,8 @@ def copy_files_to_output():
             if is_valid_file:
                 if mod_file.lower().endswith('.img'):
                     file_output_dir = OUTPUT_IMG_DIR
-                elif (mod_file.lower().endswith('.ide') or mod_file.lower().endswith('.ipl') or mod_file.lower() == 'water.dat'):
+                elif (mod_file.lower().endswith('.ide') or mod_file.lower().endswith('.ipl') or 
+                      mod_file.lower() == 'water.dat' or mod_file.lower() == 'object.dat'):
                     file_output_dir = OUTPUT_MAP_DIR
                 else:
                     file_output_dir = OUTPUT_ASSETS_DIR
@@ -935,6 +949,8 @@ def move_paths():
             shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
 
 def uniquify_map_objects():
+    global vanilla_dat_objects
+    
     for file in mod_map_files:
         if isinstance(file, Ide):
             sections = [file.section_objs, file.section_tobj, file.section_anim, file.section_cars, file.section_hier, file.section_peds, file.section_weap]
@@ -959,6 +975,14 @@ def uniquify_map_objects():
             if file.section_inst:
                 for obj in file.section_inst:
                     if obj.model in dff_renames:
+                        obj.model = dff_renames[obj.model]
+                        
+        elif isinstance(file, Dat):
+            if file.section_datobj:
+                for obj in file.section_datobj:
+                    if obj.model in vanilla_dat_objects:
+                        file.section_datobj.remove(obj)
+                    elif obj.model in dff_renames:
                         obj.model = dff_renames[obj.model]
 
 def unpack_img_file(file_path):
@@ -1569,7 +1593,8 @@ def file_is_empty(file):
         '_section_mult',
         '_section_occl',
         '_section_zone',
-        '_section_water'
+        '_section_water',
+        '_section_datobj'
     ]
 
     return all(
@@ -1608,6 +1633,7 @@ if __name__ == '__main__':
     get_vanilla_placements()
     list_vanilla_files()
     get_vanilla_objects()
+    get_vanilla_dat_objects()
     get_free_ids()
     get_installed_mods_coordinates(read_installed_placement_files())
     process_files()
