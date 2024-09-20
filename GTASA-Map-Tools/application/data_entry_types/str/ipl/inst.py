@@ -34,7 +34,7 @@ class Inst(DataEntryStr):
             self._lod = int(elements[self.LOD_INDEX])
         except ValueError:
             print(f'Invalid LOD for {self._obj_id},{self._model} ({file.file_name}): "{elements[self.LOD_INDEX]}". Setting LOD as -1...')
-            self._lod = -1
+            self.lod = -1
         
         self._is_lod = False
         self._has_lod = self.lod > -1

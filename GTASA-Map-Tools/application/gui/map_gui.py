@@ -4,11 +4,15 @@ from tkinter import Canvas, Label, Entry, Checkbutton, BooleanVar, OptionMenu, S
 from PIL import Image, ImageTk, ImageDraw
 import math
 import pyperclip
+import random
 
 RESOURCES_DIR = "resources"
 SA_PATHS_DATA_EXTENDER_DIR = os.path.join(RESOURCES_DIR, "SAPathsDataExtender")
 SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
 SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
+SA_PATH_UTILITY_DIR = os.path.join(RESOURCES_DIR, "SAPathUtility")
+SA_PATH_UTILITY_NAME = "SAPathUtility.exe"
+SA_PATH_UTILITY_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
 
 class MapGui:
     def __init__(self, root, get_coordinates_func, installed_coordinates, map_size=6000, args=None):
@@ -67,12 +71,14 @@ class MapGui:
         self.rotation_values = None
         self.fix_command = True
         self.id_command = True
-        self.path_command = False
+        self.path_sapu_command = False
+        self.path_sapde_command = False
         
         # Initialize BooleanVars for checkboxes
         self.fix_invalid_var = BooleanVar(value=True)
         self.replace_ids_var = BooleanVar(value=True)
-        self.move_paths_var = BooleanVar(value=False)
+        self.move_paths_sapu_var = BooleanVar(value=False)
+        self.move_paths_sapde_var = BooleanVar(value=False)
 
         # Create checkboxes
         self.checkbox_fix_invalid = Checkbutton(root, text="Fix invalid objects", variable=self.fix_invalid_var)
@@ -81,9 +87,11 @@ class MapGui:
         self.checkbox_replace_ids = Checkbutton(root, text="Replace objects IDs", variable=self.replace_ids_var)
         self.checkbox_replace_ids.pack()
         
-        self.checkbox_move_paths = Checkbutton(root, text="Move paths", variable=self.move_paths_var, command=self.adapt_gui_to_move_paths)
-        self.checkbox_move_paths.pack()
-        self.update_move_paths_checkbox()
+        self.checkbox_move_paths_sapu = Checkbutton(root, text="Move paths (SA Path Utility)", variable=self.move_paths_sapu_var, command=self.adapt_gui_to_move_paths)
+        self.checkbox_move_paths_sapu.pack()
+        self.checkbox_move_paths_sapde = Checkbutton(root, text="Move paths (SA Paths Data Extender)", variable=self.move_paths_sapde_var, command=self.adapt_gui_to_move_paths)
+        self.checkbox_move_paths_sapde.pack()
+        self.update_move_paths_checkboxes()
         self.adapt_gui_to_move_paths()
         
         # Initialize values from command line arguments
@@ -99,16 +107,36 @@ class MapGui:
                 self.entry_qz.insert(0, f"{args.rot[2]:.2f}")
                 self.entry_qw.insert(0, f"{args.rot[3]:.2f}")
 
-    def update_move_paths_checkbox(self):
-        if self.map_size == 24000 and os.path.isfile(SA_PATHS_DATA_EXTENDER_PATH):
-            self.checkbox_move_paths.config(state=tk.NORMAL)
+    def update_move_paths_checkboxes(self):
+        if os.path.isfile(SA_PATHS_DATA_EXTENDER_PATH) and self.map_size == 24000:
+            self.checkbox_move_paths_sapde.config(state=tk.NORMAL)
         else:
-            self.checkbox_move_paths.config(state=tk.DISABLED) 
-            self.move_paths_var.set(False)
+            self.checkbox_move_paths_sapde.config(state=tk.DISABLED) 
+            self.move_paths_sapde_var.set(False)
+            
+        if os.path.isfile(SA_PATH_UTILITY_PATH):
+            self.checkbox_move_paths_sapu.config(state=tk.NORMAL)
+        else:
+            self.checkbox_move_paths_sapu.config(state=tk.DISABLED) 
+            self.move_paths_sapu_var.set(False)
             
     def adapt_gui_to_move_paths(self):
-        if self.move_paths_var.get():
-            self.path_command = True
+        if self.move_paths_sapu_var.get():
+            self.path_sapu_command = True
+            self.checkbox_move_paths_sapde.config(state=tk.DISABLED)
+        else:
+            self.path_sapu_command = False
+            if self.map_size == 24000:
+                self.checkbox_move_paths_sapde.config(state=tk.NORMAL)
+            
+        if self.move_paths_sapde_var.get():
+            self.path_sapde_command = True
+            self.checkbox_move_paths_sapu.config(state=tk.DISABLED)
+        else:
+            self.path_sapde_command = False
+            self.checkbox_move_paths_sapu.config(state=tk.NORMAL)
+        
+        if self.move_paths_sapu_var.get() or self.move_paths_sapde_var.get():
             self.update_offsets_for_paths()
             self.update_coordinate_labels()
             self.entry_angle.config(state=tk.DISABLED)
@@ -117,7 +145,6 @@ class MapGui:
             self.entry_qz.config(state=tk.DISABLED)
             self.entry_qw.config(state=tk.DISABLED)
         else:
-            self.path_command = False
             self.entry_angle.config(state=tk.NORMAL)
             self.entry_qx.config(state=tk.NORMAL)
             self.entry_qy.config(state=tk.NORMAL)
@@ -139,10 +166,9 @@ class MapGui:
         self.mouse_coordinates_label.config(text=f"X: {map_x:.2f} Y: {map_y:.2f}")
         
     def copy_coordinates_to_clipboard(self, event):
-        if self.root.focus_get() is None or not isinstance(self.root.focus_get(), tk.Entry):
-            # Copy "X Y 0" coordinates in focus to clipboard
-            coordinates_text = f"{self.current_mouse_x:.2f} {self.current_mouse_y:.2f} 0"
-            pyperclip.copy(coordinates_text)
+        # Copy "X Y 0" coordinates in focus to clipboard
+        coordinates_text = f"{self.current_mouse_x:.2f} {self.current_mouse_y:.2f} 0"
+        pyperclip.copy(coordinates_text)
 
     def load_background_image(self):
         try:
@@ -163,7 +189,7 @@ class MapGui:
         self.scale = self.canvas_size / self.map_size
         self.load_background_image()
         self.create_points_image()
-        self.update_move_paths_checkbox()
+        self.update_move_paths_checkboxes()
         self.adapt_gui_to_move_paths()
 
     def create_points_image(self):
@@ -174,28 +200,30 @@ class MapGui:
         self.tk_points_image = ImageTk.PhotoImage(self.points_image)
         self.render_points()
 
+    def generate_random_color(self):
+        return f'#{random.randint(0, 255):02x}{random.randint(0, 255):02x}{random.randint(0, 255):02x}'
+
     def draw_points(self):
         draw = ImageDraw.Draw(self.points_image)
 
-		# Draw current mod's object points
+        # Draw current mod's object points
         for x, y in self.get_coordinates_func:
             x, y = self.rotate_point(x, y)
             adj_x = (x + self.map_size / 2) * self.scale
             adj_y = self.canvas_size - ((y + self.map_size / 2) * self.scale)
             draw.rectangle([adj_x-2, adj_y-2, adj_x+2, adj_y+2], fill='purple', outline='black')
 
-		# Draw already installed mods' object points in a different layer
+        # Draw already installed mods' object points in a different layer
         self.installed_coords_image = Image.new('RGBA', (self.canvas_size, self.canvas_size), (0, 0, 0, 0))
         draw_installed_coords = ImageDraw.Draw(self.installed_coords_image)
-        
-        colors = ['red', 'green', 'blue', 'orange', 'yellow']
-        color_index = 0
+
         for mod, coords in self.installed_coordinates.items():
+            mod_color = self.generate_random_color()
+
             for x, y in coords:
                 adj_x = (x + self.map_size / 2) * self.scale
                 adj_y = self.canvas_size - ((y + self.map_size / 2) * self.scale)
-                draw_installed_coords.rectangle([adj_x-2, adj_y-2, adj_x+2, adj_y+2], fill=colors[color_index % len(colors)], outline='black')
-            color_index += 1
+                draw_installed_coords.rectangle([adj_x-2, adj_y-2, adj_x+2, adj_y+2], fill=mod_color, outline='black')
 
         self.tk_installed_coords_image = ImageTk.PhotoImage(self.installed_coords_image)
 
@@ -277,7 +305,7 @@ class MapGui:
 
     def stop_drag(self, event):
         # Adjust X and Y offsets in case paths moving is enabled
-        if self.move_paths_var.get():
+        if self.move_paths_sapu_var.get() or self.move_paths_sapde_var.get():
             self.update_offsets_for_paths()
 
         # Update rendered points
@@ -289,7 +317,7 @@ class MapGui:
         self.start_y = 0
 
     def adjust_rotation(self, event):
-        if not self.move_paths_var.get():
+        if not self.move_paths_sapu_var.get() and not self.move_paths_sapde_var.get():
             # Scroll up: increase angle; Scroll down: decrease angle
             delta = -event.delta if event.delta else event.delta  # Handle delta sign (positive/negative) based on platform
             self.rotation_angle = (self.rotation_angle + delta / 120) % 360  # 120 is a common scroll delta step
@@ -319,15 +347,12 @@ class MapGui:
         self.entry_y.delete(0, tk.END)
         self.entry_y.insert(0, f"{self.offset_y:.2f}")
 
-        self.entry_z.delete(0, tk.END)
-        self.entry_z.insert(0, "0.00")  # Default Z value
-
     def update_coordinates_from_entry(self, event):
         try:
             self.offset_x = float(self.entry_x.get())
             self.offset_y = float(self.entry_y.get())
             
-            if self.move_paths_var.get():
+            if self.move_paths_sapu_var.get() or self.move_paths_sapde_var.get():
                 self.update_offsets_for_paths()
                 self.update_coordinate_labels()
             
@@ -372,7 +397,8 @@ class MapGui:
         self.rotation_values = self.get_rotation_values()
         self.fix_command = self.fix_invalid_var.get()
         self.id_command = self.replace_ids_var.get()
-        self.path_command = self.move_paths_var.get()
+        self.path_sapu_command = self.move_paths_sapu_var.get()
+        self.path_sapde_command = self.move_paths_sapde_var.get()
         
         # Close GUI after saving data
         self.root.destroy()
@@ -380,11 +406,20 @@ class MapGui:
     def get_map_coordinates(self):
         try:
             x = float(self.entry_x.get())
-            y = float(self.entry_y.get())
-            z = float(self.entry_z.get())
-            return (x, y, z)
         except ValueError:
-            return (0.0, 0.0, 0.0)
+            x = 0.0
+        
+        try:
+            y = float(self.entry_y.get()) 
+        except ValueError:
+            y = 0.0
+        
+        try:
+            z = float(self.entry_z.get())
+        except ValueError:
+            z = 0.0
+        
+        return (x, y, z)
 
     def get_rotation_values(self):
         try:

@@ -40,7 +40,7 @@ from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
 from application.tools.img_console import IMGConsole
 from application.tools.sa_paths_data_extender import SAPathsDataExtender
-from application.data_entry_types.str.dat.dat_object import DatObject
+from application.tools.sa_path_utility import SAPathUtility
 
 #region Constants
 SA_DATA_DIR = "C:\\Games\\GTA San Andreas\\data"
@@ -62,6 +62,11 @@ SA_PATHS_DATA_EXTENDER_INPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Inp
 SA_PATHS_DATA_EXTENDER_OUTPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Output")
 SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
 SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
+SA_PATH_UTILITY_DIR = os.path.join(RESOURCES_DIR, "SAPathUtility")
+SA_PATH_UTILITY_INPUT_DIR = os.path.join(SA_PATH_UTILITY_DIR, "Input")
+SA_PATH_UTILITY_OUTPUT_DIR = os.path.join(SA_PATH_UTILITY_DIR, "Output")
+SA_PATH_UTILITY_NAME = "SAPathUtility.exe"
+SA_PATH_UTILITY_PATH = os.path.join(SA_PATH_UTILITY_DIR, SA_PATHS_DATA_EXTENDER_NAME)
 INVALID_IDS_FILE_NAME = 'invalid_ids.txt'
 INVALID_IDS_PATH = os.path.join(RESOURCES_DIR, INVALID_IDS_FILE_NAME)
 VANILLA_FILES_FILE_NAME = "vanilla_files.txt"
@@ -77,11 +82,13 @@ VANILLA_PLACEMENTS_PATH =  os.path.join(RESOURCES_DIR, VANILLA_PLACEMENTS_FILE_N
 #region Global variables
 fix_command = False
 id_command = False
-path_command = False
+path_sapu_command = False
+path_sapde_command = False
 map_command = False
 map_command_x = 0
 map_command_y = 0
 map_command_z = 0
+map_size = 6000
 
 mod_map_files = []
 vanilla_objects = {}
@@ -200,8 +207,8 @@ def get_ids_in_use():
     return ids_in_use
 
 def process_files():
-    global fix_command, id_command, path_command
-    global map_command, map_command_x, map_command_y, map_command_z
+    global fix_command, id_command, path_sapu_command, path_sapde_command
+    global map_command, map_command_x, map_command_y, map_command_z, map_size
     global rot_command,rot_command_x, rot_command_y, rot_command_z, rot_command_w
     
     copy_files_to_output()
@@ -234,11 +241,23 @@ def process_files():
     else:
         id_command = False
         
-    if app.path_command:
-        path_command = True
+    if app.path_sapu_command:
+        path_sapu_command = True
     else:
-        path_command = False
+        path_sapu_command = False
         
+    if app.path_sapde_command:
+        path_sapde_command = True
+    else:
+        path_sapde_command = False
+        
+    if app.map_size:
+        map_size = app.map_size
+        
+    list_vanilla_files()
+    get_vanilla_objects()
+    get_vanilla_dat_objects()
+    get_free_ids()
     uniquify_mod_files()
     read_map_files()
     uniquify_map_objects()
@@ -378,6 +397,7 @@ def modify_map_files():
     global fix_command
     global id_command
     global map_command
+    global path_sapu_command, path_sapde_command
     
     if fix_command:
         remove_unreferenced_objects()
@@ -385,7 +405,11 @@ def modify_map_files():
         update_ids()
     if map_command:
         modify_coordinates()
-        move_paths()
+        if path_sapu_command:
+            move_paths_sapu()
+        elif path_sapde_command:
+            move_paths_sapde()
+        
     if rot_command:
         rotate_coordinates()
 
@@ -489,12 +513,6 @@ def remove_unreferenced_objects():
     
     ide_ids = {gta_object.obj_id for gta_object in ide_objects}
     
-    for inst_object in chain(inst_objects, inst_binary_objects):
-        if inst_object.obj_id not in ide_ids and inst_object.obj_id not in vanilla_ids:
-            print(f"({inst_object.file_name}) [{inst_object.obj_id},{inst_object.model}] not found in any IDE or in vanilla objects")
-        elif inst_object.obj_id not in ide_ids and inst_object.obj_id in vanilla_ids and inst_object.model.lower() != vanilla_objects[inst_object.obj_id].lower():
-            print(f"Different model used: ({inst_object.file_name}) [{inst_object.obj_id},{inst_object.model}] x [{inst_object.obj_id},{vanilla_objects[inst_object.obj_id]}] (Vanilla)")
-
     ide_models = [gta_object.model for gta_object in ide_objects]
     ide_ids = [gta_object.obj_id for gta_object in ide_objects]
 
@@ -538,12 +556,6 @@ def remove_unreferenced_objects():
 
     total_inst_ids = {gta_object.obj_id for gta_object in inst_objects} | {gta_object.obj_id for gta_object in inst_binary_objects}
     total_inst_models = {gta_object.model for gta_object in inst_objects} | {gta_object.model for gta_object in inst_binary_objects}
-    
-    for ide_object in ide_objects:
-        if ide_object.obj_id not in total_inst_ids and ide_object.obj_id not in vanilla_ids:
-            print(f"({ide_object.file_name}) [{ide_object.obj_id},{ide_object.model}] not found in any IPL or in vanilla objects")
-        elif ide_object.obj_id not in total_inst_ids and ide_object.obj_id in vanilla_ids and ide_object.model.lower() != vanilla_objects[ide_object.obj_id].lower():
-            print(f"Different model used: ({ide_object.file_name}) [{ide_object.obj_id},{ide_object.model}] x [{ide_object.obj_id},{vanilla_objects[ide_object.obj_id]}] (Vanilla)")
     
     unused_ide_objects = [gta_object for gta_object in ide_objects if gta_object.obj_id not in total_inst_ids and gta_object.model not in total_inst_models]
     unused_ide_objects = list(set(unused_ide_objects))
@@ -783,7 +795,7 @@ def get_gta_dat_filenames():
     return gta_dat_file_names
 
 def uniquify_mod_files():
-    global path_command
+    global path_sapu_command
     global object_resources_renames
     global existent_binary_ipl_files
     unpacked_img_directories = []
@@ -852,17 +864,29 @@ def uniquify_mod_files():
                             other_file_paths.append(file_path)
     
     # Move every node file to a temporary location
+    if os.path.exists(SA_PATH_UTILITY_INPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_INPUT_DIR):
+        shutil.rmtree(SA_PATH_UTILITY_INPUT_DIR)
+        
+    if os.path.exists(SA_PATH_UTILITY_OUTPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_OUTPUT_DIR):
+        shutil.rmtree(SA_PATH_UTILITY_OUTPUT_DIR)
+        
     if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
         shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
         
     if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
         shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
         
-    if node_file_paths and map_command and path_command:
-        os.makedirs(SA_PATHS_DATA_EXTENDER_INPUT_DIR, exist_ok=True)
-        
-        for file_path in node_file_paths:
-            shutil.move(file_path, SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+    if node_file_paths and map_command:
+        if path_sapu_command:
+            os.makedirs(SA_PATH_UTILITY_INPUT_DIR, exist_ok=True)
+            
+            for file_path in node_file_paths:
+                shutil.move(file_path, SA_PATH_UTILITY_INPUT_DIR)
+        elif path_sapde_command:
+            os.makedirs(SA_PATHS_DATA_EXTENDER_INPUT_DIR, exist_ok=True)
+            
+            for file_path in node_file_paths:
+                shutil.move(file_path, SA_PATHS_DATA_EXTENDER_INPUT_DIR)
     else:
         for file_path in node_file_paths:
             os.remove(file_path)
@@ -917,36 +941,70 @@ def uniquify_mod_files():
                 file_path = os.path.join(root, file)
                 uniquify_map_file(file_path)
 
-def move_paths():
+def move_paths_sapde():
     global map_command_x
     global map_command_y
     global map_command_z
     
-    for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-        node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_INPUT_DIR, node_file)
-        
-        if is_vanilla_file(node_file_path) or is_fastman_node_format(node_file_path):
-            os.remove(node_file_path)
+    if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+        for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+            node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_INPUT_DIR, node_file)
             
-    if any(os.scandir(SA_PATHS_DATA_EXTENDER_INPUT_DIR)):
-        os.makedirs(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, exist_ok=True)
-        pathsExtender = SAPathsDataExtender()
-        paths_moved = pathsExtender.run(map_command_x, map_command_y, map_command_z)
-        
-        if paths_moved:
-            os.makedirs(OUTPUT_PATHS_DIR, exist_ok=True)
+            if is_vanilla_file(node_file_path) or is_fastman_node_format(node_file_path):
+                os.remove(node_file_path)
+                
+        if any(os.scandir(SA_PATHS_DATA_EXTENDER_INPUT_DIR)):
+            os.makedirs(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, exist_ok=True)
+            pathsExtender = SAPathsDataExtender()
+            paths_moved = pathsExtender.run(map_command_x, map_command_y, map_command_z)
             
-        for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
-            node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, node_file)
+            if paths_moved:
+                os.makedirs(OUTPUT_PATHS_DIR, exist_ok=True)
+                
+            for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
+                node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, node_file)
+                
+                if os.path.isfile(node_file_path):
+                    shutil.move(node_file_path, os.path.join(OUTPUT_PATHS_DIR, node_file))
+                
+            if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
+                shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+                
+            if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
+                shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
             
-            if os.path.isfile(node_file_path):
-                shutil.move(node_file_path, os.path.join(OUTPUT_PATHS_DIR, node_file))
+def move_paths_sapu():
+    global map_command_x
+    global map_command_y
+    global map_command_z
+    global map_size
+    
+    if os.path.exists(SA_PATH_UTILITY_INPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_INPUT_DIR):
+        for node_file in os.listdir(SA_PATH_UTILITY_INPUT_DIR):
+            node_file_path = os.path.join(SA_PATH_UTILITY_INPUT_DIR, node_file)
             
-        if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-            shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
-            
-        if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
-            shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
+            if is_vanilla_file(node_file_path):
+                os.remove(node_file_path)
+                
+        if any(os.scandir(SA_PATH_UTILITY_INPUT_DIR)):
+            os.makedirs(SA_PATH_UTILITY_OUTPUT_DIR, exist_ok=True)
+            path_utility = SAPathUtility()
+            paths_moved = path_utility.run(map_command_x, map_command_y, map_command_z, map_size)
+            # pathUtility.close()
+            if any(Path(SA_PATH_UTILITY_OUTPUT_DIR).glob('*.*')):
+                os.makedirs(OUTPUT_PATHS_DIR, exist_ok=True)
+                
+                for node_file in os.listdir(SA_PATH_UTILITY_OUTPUT_DIR):
+                    node_file_path = os.path.join(SA_PATH_UTILITY_OUTPUT_DIR, node_file)
+                    
+                    if os.path.isfile(node_file_path):
+                        shutil.move(node_file_path, os.path.join(OUTPUT_PATHS_DIR, node_file))
+                    
+                if os.path.exists(SA_PATH_UTILITY_INPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_INPUT_DIR):
+                    shutil.rmtree(SA_PATH_UTILITY_INPUT_DIR)
+                    
+                if os.path.exists(SA_PATH_UTILITY_OUTPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_OUTPUT_DIR):
+                    shutil.rmtree(SA_PATH_UTILITY_OUTPUT_DIR)
 
 def uniquify_map_objects():
     global vanilla_dat_objects
@@ -1511,6 +1569,8 @@ def update_current_assets_names():
     txd_new_basenames = set(txd_renames.values())
 
 def object_has_assets(gta_object):
+    global vanilla_objects
+    global ide_objects
     global vanilla_files_basenames
     global dff_new_basenames
     global col_models_new_basenames
@@ -1538,9 +1598,19 @@ def object_has_assets(gta_object):
             else:
                 asset_object = gta_object
                 
-            # Whichever is the asset object for an INST object, its model needs to have a respective DFF file, be it from the mod or from vanilla
-            if ((asset_object.model in dff_new_basenames and asset_object.model in col_models_new_basenames) or asset_object.model in vanilla_files_basenames):
+            # Whichever is the asset object for an INST object, its model needs to have respective DFF and COL files,
+            # so check if the asset object has them
+            if asset_object.model in dff_new_basenames and asset_object.model in col_models_new_basenames:
                 return True
+            else:
+                corresponding_ide_object = next((obj for obj in ide_objects if obj.obj_id == asset_object.obj_id), None)
+                
+                # Otherwise check if the IDE object with the same ID has them
+                if ((corresponding_ide_object and 
+                    (corresponding_ide_object.model in dff_new_basenames and corresponding_ide_object.model in col_models_new_basenames)) or
+                    # Or if it's a vanilla object
+                    (asset_object.model in vanilla_files_basenames or asset_object.obj_id in vanilla_objects)):
+                    return True
             
     return False
                 
@@ -1617,7 +1687,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     fix_command = args.fix
     id_command = args.id
-    path_command = args.path
+    path_sapu_command = args.path
     map_command = args.map is not None
     map_command_x = args.map[0] if map_command else None
     map_command_y = args.map[1] if map_command else None
@@ -1631,11 +1701,6 @@ if __name__ == '__main__':
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     get_vanilla_placements()
-    list_vanilla_files()
-    get_vanilla_objects()
-    get_vanilla_dat_objects()
-    get_free_ids()
-    get_installed_mods_coordinates(read_installed_placement_files())
     process_files()
     build_mod_dat()
     print('Finished processing files!')
