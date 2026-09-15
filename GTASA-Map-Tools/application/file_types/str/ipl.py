@@ -306,6 +306,12 @@ class Ipl(ObjectsFile):
                 line_position = data_entry.index
                 
                 if current_section == 'inst':
+                    inst_elements = data_entry.get_content_elements()
+                    
+                    if len(inst_elements) < 11:
+                        print(f'({self.file_name} - line {data_entry.index + 2}) Invalid inst entry: expected 11 elements but got {len(inst_elements)}. Skipping: "{data_entry.content}"')
+                        continue
+                    
                     gta_object = Inst(*data_entry.get_attributes())
                     self.add_to_section_inst(gta_object)
                 elif current_section == 'cull':

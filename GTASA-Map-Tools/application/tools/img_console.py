@@ -20,7 +20,10 @@ class IMGConsole:
 
     def start(self):
         if not self.process:
-            self.process = subprocess.Popen(self.IMG_CONSOLE_PATH, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
+            self.process = subprocess.Popen(self.IMG_CONSOLE_PATH, stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True, encoding='cp1252', errors='replace', shell=True)
+            
             self.output_thread = Thread(target=self._enqueue_output, args=(self.process.stdout, self.queue))
             self.output_thread.daemon = True
             self.output_thread.start()
