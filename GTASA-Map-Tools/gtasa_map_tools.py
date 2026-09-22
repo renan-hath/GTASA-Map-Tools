@@ -10,6 +10,7 @@ from itertools import chain
 from pathlib import Path
 
 import chardet
+import customtkinter
 import tkinter as tk
 import unidecode
 
@@ -40,7 +41,7 @@ from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
 from application.tools.img_console import IMGConsole
 from application.tools.sa_paths_data_extender import SAPathsDataExtender
-from application.tools.sa_path_utility import SAPathUtility
+# from application.tools.sa_path_utility import SAPathUtility
 
 #region Constants
 SA_DATA_DIR = "C:\\Games\\GTA San Andreas\\data"
@@ -84,6 +85,7 @@ fix_command = False
 id_command = False
 path_sapu_command = False
 path_sapde_command = False
+remove_grge_command = False
 map_command = False
 map_command_x = 0
 map_command_y = 0
@@ -210,10 +212,11 @@ def process_files():
     global fix_command, id_command, path_sapu_command, path_sapde_command
     global map_command, map_command_x, map_command_y, map_command_z, map_size
     global rot_command,rot_command_x, rot_command_y, rot_command_z, rot_command_w
+    global remove_grge_command
     
     copy_files_to_output()
-    root = tk.Tk()
-    root.title("GTA Map Renderer")
+    root = customtkinter.CTk()
+    root.title("GTA Map Tools")
     mod_coordinates = get_mod_coordinates(read_mod_placement_files())
     installed_mods_coordinates = get_installed_mods_coordinates(read_installed_placement_files())
     app = MapGui(root, mod_coordinates, installed_mods_coordinates)
@@ -250,6 +253,11 @@ def process_files():
         path_sapde_command = True
     else:
         path_sapde_command = False
+        
+    if app.remove_grge_command:
+        remove_grge_command = True
+    else:
+        remove_grge_command = False
         
     if app.map_size:
         map_size = app.map_size
@@ -398,7 +406,11 @@ def modify_map_files():
     global id_command
     global map_command
     global path_sapu_command, path_sapde_command
+    global remove_grge_command
     
+    if remove_grge_command:
+        remove_grge_sections()
+        
     if fix_command:
         remove_unreferenced_objects()
     if id_command:
@@ -414,6 +426,16 @@ def modify_map_files():
         rotate_coordinates()
 
     return
+
+def remove_grge_sections():
+    global mod_map_files
+    global coordinate_objects
+    
+    for file in mod_map_files:
+        if isinstance(file, Ipl) and file.section_grge:
+            file.section_grge.clear()
+    
+    coordinate_objects[:] = [obj for obj in coordinate_objects if not isinstance(obj, Grge)]
 
 def remove_unreferenced_objects():
     global vanilla_ids
