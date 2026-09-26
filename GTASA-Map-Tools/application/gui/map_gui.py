@@ -71,6 +71,7 @@ class MapGui:
         self.path_sapu_command = False
         self.path_sapde_command = False
         self.remove_grge_command = True
+        self.clean_assets_command = True
 
         # Initialize BooleanVars for checkboxes
         self.fix_invalid_var = ctk.BooleanVar(value=True)
@@ -78,6 +79,7 @@ class MapGui:
         self.move_paths_sapu_var = ctk.BooleanVar(value=False)
         self.move_paths_sapde_var = ctk.BooleanVar(value=False)
         self.remove_grge_var = ctk.BooleanVar(value=True)
+        self.clean_assets_var = ctk.BooleanVar(value=True)
 
         # Create checkboxes
         self.checkbox_fix_invalid = ctk.CTkCheckBox(self.options_section, text="Fix invalid objects",
@@ -102,6 +104,10 @@ class MapGui:
         self.checkbox_remove_grge = ctk.CTkCheckBox(self.options_section, text="Remove new garages",
                                                     variable=self.remove_grge_var)
         self.checkbox_remove_grge.pack(fill="x", pady=2)
+
+        self.checkbox_clean_assets = ctk.CTkCheckBox(self.options_section, text="Clean assets",
+                                                     variable=self.clean_assets_var)
+        self.checkbox_clean_assets.pack(fill="x", pady=2)
 
         self.update_move_paths_checkboxes()
         self.adapt_gui_to_move_paths()
@@ -592,6 +598,7 @@ class MapGui:
         self.path_sapu_command = self.move_paths_sapu_var.get()
         self.path_sapde_command = self.move_paths_sapde_var.get()
         self.remove_grge_command = self.remove_grge_var.get()
+        self.clean_assets_command = self.clean_assets_var.get()
 
         # Close GUI after saving data
         self.root.destroy()

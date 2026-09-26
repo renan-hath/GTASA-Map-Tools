@@ -78,6 +78,10 @@ VANILLA_DAT_OBJECTS_FILE_NAME = "vanilla_dat_objects.txt"
 VANILLA_DAT_OBJECTS_FILE_PATH = os.path.join(RESOURCES_DIR, VANILLA_DAT_OBJECTS_FILE_NAME)
 VANILLA_PLACEMENTS_FILE_NAME = "vanilla_placements.txt"
 VANILLA_PLACEMENTS_PATH =  os.path.join(RESOURCES_DIR, VANILLA_PLACEMENTS_FILE_NAME)
+VANILLA_WATER_PLACEMENTS_FILE_NAME = "vanilla_water_placements.txt"
+VANILLA_WATER_PLACEMENTS_PATH = os.path.join(RESOURCES_DIR, VANILLA_WATER_PLACEMENTS_FILE_NAME)
+VANILLA_TRACKS_FILE_NAME = "vanilla_tracks_placements.txt"
+VANILLA_TRACKS_PLACEMENTS_PATH = os.path.join(RESOURCES_DIR, VANILLA_TRACKS_FILE_NAME)
 #endregion
 
 #region Global variables
@@ -86,6 +90,7 @@ id_command = False
 path_sapu_command = False
 path_sapde_command = False
 remove_grge_command = False
+clean_assets_command = True
 map_command = False
 map_command_x = 0
 map_command_y = 0
@@ -115,6 +120,8 @@ txd_renames = {}
 new_col_files = []
 free_ids = []
 vanilla_placements = []
+vanilla_water_placements = set()
+vanilla_tracks_placements = set()
 inst_binary_files = {}
 existent_binary_ipl_files = False
 dff_models = []
@@ -213,6 +220,7 @@ def process_files():
     global map_command, map_command_x, map_command_y, map_command_z, map_size
     global rot_command,rot_command_x, rot_command_y, rot_command_z, rot_command_w
     global remove_grge_command
+    global clean_assets_command
     
     copy_files_to_output()
     root = customtkinter.CTk()
@@ -259,12 +267,22 @@ def process_files():
     else:
         remove_grge_command = False
         
+    if app.clean_assets_command:
+        clean_assets_command = True
+    else:
+        clean_assets_command = False
+        
     if app.map_size:
         map_size = app.map_size
+        
+    if clean_assets_command:
+        clean_assets()
         
     list_vanilla_files()
     get_vanilla_objects()
     get_vanilla_dat_objects()
+    get_vanilla_water_placements()
+    get_vanilla_tracks_placements()
     get_free_ids()
     uniquify_mod_files()
     read_map_files()
@@ -293,7 +311,8 @@ def read_map_files():
                 elif file_extension == 'ipl':
                     file = Ipl(file_name, file_content)
                 elif (file_name.lower() == 'water.dat' or
-                      file_name.lower() == 'object.dat'):
+                      file_name.lower() == 'object.dat' or
+                      is_tracks_dat_file(file_name)):
                     file = Dat(file_name, file_content)
                     
             mod_map_files.append(file)
@@ -398,6 +417,7 @@ def list_objects_to_modify():
                 coordinate_objects.extend(file.section_cars)
         elif isinstance(file, Dat):
             coordinate_objects.extend(file.section_water)
+            coordinate_objects.extend(file.section_tracks)
                 
     inst_total_objects = inst_objects + inst_binary_objects
 
@@ -782,7 +802,8 @@ def copy_files_to_output():
                 if mod_file.lower().endswith('.img'):
                     file_output_dir = OUTPUT_IMG_DIR
                 elif (mod_file.lower().endswith('.ide') or mod_file.lower().endswith('.ipl') or 
-                      mod_file.lower() == 'water.dat' or mod_file.lower() == 'object.dat'):
+                      mod_file.lower() == 'water.dat' or mod_file.lower() == 'object.dat' or
+                      is_tracks_dat_file(mod_file)):
                     file_output_dir = OUTPUT_MAP_DIR
                 else:
                     file_output_dir = OUTPUT_ASSETS_DIR
@@ -790,7 +811,23 @@ def copy_files_to_output():
                 os.chmod(file_path, stat.S_IWRITE)
                 os.makedirs(file_output_dir, exist_ok=True)
                 shutil.copy(os.path.join(root, mod_file), file_output_dir)
+                
+def clean_assets():
+    for file_name in os.listdir(OUTPUT_ASSETS_DIR):
+        file_path = os.path.join(OUTPUT_ASSETS_DIR, file_name)
+        
+        if os.path.isfile(file_path):
+            file_extension = os.path.splitext(file_name)[1].lower()
             
+            if file_extension not in ('.dff', '.txd', '.col'):
+                if (re.match(r'^nodes\d+\.dat$', file_name.lower()) and
+                    (path_sapu_command or path_sapde_command)):
+                    continue
+                    
+                os.chmod(file_path, stat.S_IWRITE)
+                os.remove(file_path)
+                print(f"Removed {file_name} from: {OUTPUT_ASSETS_DIR}")
+
 def get_gta_dat_filenames():
     gta_dat_file_names = []
     gta_dat_path = ''
@@ -1030,6 +1067,8 @@ def move_paths_sapu():
 
 def uniquify_map_objects():
     global vanilla_dat_objects
+    global vanilla_water_placements
+    global vanilla_tracks_placements
     
     for file in mod_map_files:
         if isinstance(file, Ide):
@@ -1064,6 +1103,16 @@ def uniquify_map_objects():
                         file.section_datobj.remove(obj)
                     elif obj.model in dff_renames:
                         obj.model = dff_renames[obj.model]
+            
+            if file.section_water:
+                for obj in list(file.section_water):
+                    if get_water_placement(obj.get_content_elements()) in vanilla_water_placements:
+                        file.section_water.remove(obj)
+            
+            if file.section_tracks:
+                for obj in list(file.section_tracks):
+                    if get_water_placement(obj.get_content_elements()) in vanilla_tracks_placements:
+                        file.section_tracks.remove(obj)
 
 def unpack_img_file(file_path):
     img_file = os.path.basename(file_path)
@@ -1460,6 +1509,33 @@ def get_vanilla_placements():
             elements = get_placement(elements)
             vanilla_placements.add(tuple(elements))
 
+def get_vanilla_water_placements():
+    global vanilla_water_placements
+    vanilla_water_placements = set()
+    
+    with open(VANILLA_WATER_PLACEMENTS_PATH, 'r', encoding='utf-8') as f:
+        for line in f:
+            elements = line.strip().split(',')
+            vanilla_water_placements.add(tuple(elements))
+
+def get_vanilla_tracks_placements():
+    global vanilla_tracks_placements
+    vanilla_tracks_placements = set()
+    
+    with open(VANILLA_TRACKS_PLACEMENTS_PATH, 'r', encoding='utf-8') as f:
+        for line in f:
+            elements = line.strip().split(',')
+            vanilla_tracks_placements.add(tuple(elements))
+
+def is_tracks_dat_file(file_name):
+    if (file_name.lower() == 'tracks.dat' or
+        (file_name.lower().startswith('tracks') and
+         file_name.lower().endswith('.dat') and
+         file_name.lower()[6:-4].isdigit())):
+        return True
+    else:
+        return False
+
 def repack_inst_binary_files():
     global inst_binary_files
     
@@ -1662,6 +1738,19 @@ def get_placement(line_elements):
         # In case of INST objects, their ID, model and coordinates alone are enough to identify a placement
         return tuple(normalized_elements[i] for i in [0, 1, 3, 4, 5])
 
+def get_water_placement(line_elements):
+    normalized_elements = []
+    
+    for element in line_elements:
+        try:
+            element = str(round(float(element), 2))
+        except ValueError:
+            pass
+        
+        normalized_elements.append(element)
+    
+    return tuple(normalized_elements)
+
 def file_is_empty(file):
     section_names = [
         '_section_objs',
@@ -1686,7 +1775,8 @@ def file_is_empty(file):
         '_section_occl',
         '_section_zone',
         '_section_water',
-        '_section_datobj'
+        '_section_datobj',
+        '_section_tracks'
     ]
 
     return all(
