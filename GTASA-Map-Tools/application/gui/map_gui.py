@@ -4,16 +4,9 @@ import random
 
 import customtkinter as ctk
 import tkinter as tk
+from tkinter import filedialog
 import pyperclip
 from PIL import Image, ImageTk, ImageDraw
-
-RESOURCES_DIR = "resources"
-SA_PATHS_DATA_EXTENDER_DIR = os.path.join(RESOURCES_DIR, "SAPathsDataExtender")
-SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
-SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
-SA_PATH_UTILITY_DIR = os.path.join(RESOURCES_DIR, "SAPathUtility")
-SA_PATH_UTILITY_NAME = "SAPathUtility.exe"
-SA_PATH_UTILITY_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
 
 FONT_FAMILY = "Segoe UI"
 SECTION_PADX = 10
@@ -24,8 +17,12 @@ RESIZE_THRESHOLD = 6      # Minimum pixel change that triggers a re-render
 
 
 class MapGui:
-    def __init__(self, root, get_coordinates_func, installed_coordinates, map_size=6000, args=None):
+    def __init__(self, root, get_coordinates_func, installed_coordinates, map_size=6000, args=None, procobj_available=False,
+                 game_dir='', save_game_dir_func=None):
         self.root = root
+        self.game_dir = game_dir
+        self.save_game_dir_func = save_game_dir_func
+        self.settings_window = None
 
         self.start_x = 0
         self.start_y = 0
@@ -68,18 +65,18 @@ class MapGui:
         self.rotation_values = None
         self.fix_command = True
         self.id_command = True
-        self.path_sapu_command = False
-        self.path_sapde_command = False
+        self.path_command = False
         self.remove_grge_command = True
         self.clean_assets_command = True
+        self.procobj_command = False
 
         # Initialize BooleanVars for checkboxes
         self.fix_invalid_var = ctk.BooleanVar(value=True)
         self.replace_ids_var = ctk.BooleanVar(value=True)
-        self.move_paths_sapu_var = ctk.BooleanVar(value=False)
-        self.move_paths_sapde_var = ctk.BooleanVar(value=False)
+        self.move_paths_var = ctk.BooleanVar(value=False)
         self.remove_grge_var = ctk.BooleanVar(value=True)
         self.clean_assets_var = ctk.BooleanVar(value=True)
+        self.convert_procobj_var = ctk.BooleanVar(value=procobj_available)
 
         # Create checkboxes
         self.checkbox_fix_invalid = ctk.CTkCheckBox(self.options_section, text="Fix invalid objects",
@@ -90,16 +87,10 @@ class MapGui:
                                                     variable=self.replace_ids_var)
         self.checkbox_replace_ids.pack(fill="x", pady=2)
 
-        self.checkbox_move_paths_sapu = ctk.CTkCheckBox(self.options_section, text="Move paths (SA Path Utility)",
-                                                        variable=self.move_paths_sapu_var,
-                                                        command=self.adapt_gui_to_move_paths)
-        self.checkbox_move_paths_sapu.pack(fill="x", pady=2)
-
-        self.checkbox_move_paths_sapde = ctk.CTkCheckBox(self.options_section,
-                                                         text="Move paths (SA Paths Data Extender)",
-                                                         variable=self.move_paths_sapde_var,
-                                                         command=self.adapt_gui_to_move_paths)
-        self.checkbox_move_paths_sapde.pack(fill="x", pady=2)
+        self.checkbox_move_paths = ctk.CTkCheckBox(self.options_section, text="Move paths",
+                                                   variable=self.move_paths_var,
+                                                   command=self.adapt_gui_to_move_paths)
+        self.checkbox_move_paths.pack(fill="x", pady=2)
 
         self.checkbox_remove_grge = ctk.CTkCheckBox(self.options_section, text="Remove new garages",
                                                     variable=self.remove_grge_var)
@@ -109,7 +100,12 @@ class MapGui:
                                                      variable=self.clean_assets_var)
         self.checkbox_clean_assets.pack(fill="x", pady=2)
 
-        self.update_move_paths_checkboxes()
+        # Only available when the mod has a procobj.dat file
+        self.checkbox_convert_procobj = ctk.CTkCheckBox(self.options_section, text="Convert procobj.dat",
+                                                        variable=self.convert_procobj_var,
+                                                        state=tk.NORMAL if procobj_available else tk.DISABLED)
+        self.checkbox_convert_procobj.pack(fill="x", pady=2)
+
         self.adapt_gui_to_move_paths()
 
         self.create_coordinate_labels()
@@ -149,6 +145,10 @@ class MapGui:
         self.root.after(10, self._maximize_window)
         self.root.bind("<Map>", self._on_window_map)
 
+        # The game folder is needed to find the IDs and the mods already installed
+        if not self.game_dir:
+            self.root.after(500, self.open_settings)
+
     def _maximize_window(self):
         try:
             self.root.state("zoomed")
@@ -183,6 +183,10 @@ class MapGui:
         subtitle = ctk.CTkLabel(self.header, text="Position the map mod in your location of preference.",
                                 text_color=("gray25", "gray65"))
         subtitle.grid(row=1, column=0, columnspan=2, sticky="w", padx=(18, 10), pady=(0, 12))
+
+        self.settings_button = ctk.CTkButton(self.header, text="Settings", width=100,
+                                             command=self.open_settings)
+        self.settings_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(10, 18))
 
         # Main content
         self.content = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -382,36 +386,10 @@ class MapGui:
 
     # Paths options
 
-    def update_move_paths_checkboxes(self):
-        if os.path.isfile(SA_PATHS_DATA_EXTENDER_PATH) and self.map_size == 24000:
-            self.checkbox_move_paths_sapde.configure(state=tk.NORMAL)
-        else:
-            self.checkbox_move_paths_sapde.configure(state=tk.DISABLED)
-            self.move_paths_sapde_var.set(False)
-
-        if os.path.isfile(SA_PATH_UTILITY_PATH):
-            self.checkbox_move_paths_sapu.configure(state=tk.NORMAL)
-        else:
-            self.checkbox_move_paths_sapu.configure(state=tk.DISABLED)
-            self.move_paths_sapu_var.set(False)
-
     def adapt_gui_to_move_paths(self):
-        if self.move_paths_sapu_var.get():
-            self.path_sapu_command = True
-            self.checkbox_move_paths_sapde.configure(state=tk.DISABLED)
-        else:
-            self.path_sapu_command = False
-            if self.map_size == 24000:
-                self.checkbox_move_paths_sapde.configure(state=tk.NORMAL)
+        self.path_command = self.move_paths_var.get()
 
-        if self.move_paths_sapde_var.get():
-            self.path_sapde_command = True
-            self.checkbox_move_paths_sapu.configure(state=tk.DISABLED)
-        else:
-            self.path_sapde_command = False
-            self.checkbox_move_paths_sapu.configure(state=tk.NORMAL)
-
-        if self.move_paths_sapu_var.get() or self.move_paths_sapde_var.get():
+        if self.move_paths_var.get():
             self.update_offsets_for_paths()
             self.update_coordinate_labels()
             self.entry_angle.configure(state=tk.DISABLED)
@@ -427,6 +405,66 @@ class MapGui:
             self.entry_qz.configure(state=tk.NORMAL)
             self.entry_qw.configure(state=tk.NORMAL)
             self.rotation_slider.configure(state=tk.NORMAL)
+
+    # Settings
+
+    def open_settings(self):
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.focus()
+            return
+
+        window = ctk.CTkToplevel(self.root)
+        window.title("Settings")
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.grid_columnconfigure(0, weight=1)
+        self.settings_window = window
+
+        label = ctk.CTkLabel(window, text="GTA San Andreas installation folder:", anchor="w")
+        label.grid(row=0, column=0, columnspan=2, sticky="w", padx=SECTION_PADX * 2, pady=(16, 4))
+
+        game_dir_entry = ctk.CTkEntry(window, width=420)
+        game_dir_entry.insert(0, self.game_dir)
+        game_dir_entry.grid(row=1, column=0, sticky="ew", padx=(SECTION_PADX * 2, 6))
+
+        def browse():
+            selected_dir = filedialog.askdirectory(parent=window, initialdir=game_dir_entry.get() or None,
+                                                   title="Select the GTA San Andreas installation folder")
+            if selected_dir:
+                game_dir_entry.delete(0, tk.END)
+                game_dir_entry.insert(0, os.path.normpath(selected_dir))
+
+        browse_button = ctk.CTkButton(window, text="Browse...", width=90, command=browse)
+        browse_button.grid(row=1, column=1, padx=(0, SECTION_PADX * 2))
+
+        error_label = ctk.CTkLabel(window, text="", text_color=("#b3261e", "#f2b8b5"), anchor="w")
+        error_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=SECTION_PADX * 2, pady=(4, 0))
+
+        def save():
+            game_dir = game_dir_entry.get().strip()
+
+            # Every installation has a data folder, which is where the game's IDs are read from
+            if not os.path.isdir(os.path.join(game_dir, "data")):
+                error_label.configure(text="This folder is not a GTA San Andreas installation.")
+                return
+
+            self.game_dir = game_dir
+
+            if self.save_game_dir_func:
+                self.installed_coordinates = self.save_game_dir_func(game_dir)
+                self._installed_colors = {}
+                self._draw_point_sources()
+                self._render_frame()
+
+            window.destroy()
+
+        save_button = ctk.CTkButton(window, text="Save", command=save,
+                                    font=(FONT_FAMILY, 13, "bold"))
+        save_button.grid(row=3, column=0, columnspan=2, sticky="e", padx=SECTION_PADX * 2, pady=(8, 16))
+
+        # Wait until the window is shown, otherwise it cannot take the focus
+        window.after(100, window.grab_set)
+        window.after(100, game_dir_entry.focus)
 
     # Map interaction
 
@@ -458,7 +496,6 @@ class MapGui:
         self._load_background_image_source()
         self._draw_point_sources()
         self._render_frame()
-        self.update_move_paths_checkboxes()
         self.adapt_gui_to_move_paths()
 
     def generate_random_color(self):
@@ -494,7 +531,7 @@ class MapGui:
 
     def stop_drag(self, event):
         # Adjust X and Y offsets in case paths moving is enabled
-        if self.move_paths_sapu_var.get() or self.move_paths_sapde_var.get():
+        if self.move_paths_var.get():
             self.update_offsets_for_paths()
 
         # Update rendered points
@@ -506,7 +543,7 @@ class MapGui:
         self.start_y = 0
 
     def adjust_rotation(self, event):
-        if not self.move_paths_sapu_var.get() and not self.move_paths_sapde_var.get():
+        if not self.move_paths_var.get():
             # Scroll up: increase angle; Scroll down: decrease angle
             delta = -event.delta if event.delta else event.delta  # Handle delta sign (positive/negative) based on platform
             self.rotation_angle = (self.rotation_angle + delta / 120) % 360  # 120 is a common scroll delta step
@@ -541,7 +578,7 @@ class MapGui:
             self.offset_x = float(self.entry_x.get())
             self.offset_y = float(self.entry_y.get())
 
-            if self.move_paths_sapu_var.get() or self.move_paths_sapde_var.get():
+            if self.move_paths_var.get():
                 self.update_offsets_for_paths()
                 self.update_coordinate_labels()
 
@@ -595,10 +632,10 @@ class MapGui:
         self.rotation_values = self.get_rotation_values()
         self.fix_command = self.fix_invalid_var.get()
         self.id_command = self.replace_ids_var.get()
-        self.path_sapu_command = self.move_paths_sapu_var.get()
-        self.path_sapde_command = self.move_paths_sapde_var.get()
+        self.path_command = self.move_paths_var.get()
         self.remove_grge_command = self.remove_grge_var.get()
         self.clean_assets_command = self.clean_assets_var.get()
+        self.procobj_command = self.convert_procobj_var.get()
 
         # Close GUI after saving data
         self.root.destroy()

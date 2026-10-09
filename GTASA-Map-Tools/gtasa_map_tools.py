@@ -1,11 +1,13 @@
 import argparse
 import glob
+import json
 import os
 import random
 import re
 import shutil
 import stat
 import string
+import struct
 from itertools import chain
 from pathlib import Path
 
@@ -40,34 +42,24 @@ from application.file_types.str.ipl import Ipl
 from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
 from application.tools.img_console import IMGConsole
-from application.tools.sa_paths_data_extender import SAPathsDataExtender
-# from application.tools.sa_path_utility import SAPathUtility
+from application.tools.path_positioner import PathPositioner
+from application.tools.procobj_converter import ProcObjConverter
 
 #region Constants
-SA_DATA_DIR = "C:\\Games\\GTA San Andreas\\data"
-SA_MODLOADER_DIR = "C:\\Games\\GTA San Andreas\\modloader"
+SETTINGS_PATH = "settings.json"
 INPUT_DIR = "files"
 OUTPUT_DIR = "modified_files"
 OUTPUT_IMG_DIR = os.path.join(OUTPUT_DIR, "img")
 OUTPUT_ASSETS_DIR = os.path.join(OUTPUT_DIR, "assets")
 OUTPUT_MAP_DIR = os.path.join(OUTPUT_DIR, "map")
 OUTPUT_PATHS_DIR = os.path.join(OUTPUT_DIR, "gta3.img")
+PATHS_TEMP_DIR = os.path.join(OUTPUT_DIR, "paths_temp")
 RESOURCES_DIR = "resources"
 IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
 IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
 IMG_CONSOLE_NAME = "fastman92ImgConsole32.exe"
 IMG_CONSOLE_PATH = os.path.join(IMG_CONSOLE_DIR, IMG_CONSOLE_NAME)
 VANILLA_IMG_FILE_NAMES = ['gta3.img', 'gta_int.img', 'player.img', 'cutscene.img']
-SA_PATHS_DATA_EXTENDER_DIR = os.path.join(RESOURCES_DIR, "SAPathsDataExtender")
-SA_PATHS_DATA_EXTENDER_INPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Input")
-SA_PATHS_DATA_EXTENDER_OUTPUT_DIR = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, "Output")
-SA_PATHS_DATA_EXTENDER_NAME = "sa-pathsdata-extender.exe"
-SA_PATHS_DATA_EXTENDER_PATH = os.path.join(SA_PATHS_DATA_EXTENDER_DIR, SA_PATHS_DATA_EXTENDER_NAME)
-SA_PATH_UTILITY_DIR = os.path.join(RESOURCES_DIR, "SAPathUtility")
-SA_PATH_UTILITY_INPUT_DIR = os.path.join(SA_PATH_UTILITY_DIR, "Input")
-SA_PATH_UTILITY_OUTPUT_DIR = os.path.join(SA_PATH_UTILITY_DIR, "Output")
-SA_PATH_UTILITY_NAME = "SAPathUtility.exe"
-SA_PATH_UTILITY_PATH = os.path.join(SA_PATH_UTILITY_DIR, SA_PATHS_DATA_EXTENDER_NAME)
 INVALID_IDS_FILE_NAME = 'invalid_ids.txt'
 INVALID_IDS_PATH = os.path.join(RESOURCES_DIR, INVALID_IDS_FILE_NAME)
 VANILLA_FILES_FILE_NAME = "vanilla_files.txt"
@@ -82,15 +74,31 @@ VANILLA_WATER_PLACEMENTS_FILE_NAME = "vanilla_water_placements.txt"
 VANILLA_WATER_PLACEMENTS_PATH = os.path.join(RESOURCES_DIR, VANILLA_WATER_PLACEMENTS_FILE_NAME)
 VANILLA_TRACKS_FILE_NAME = "vanilla_tracks_placements.txt"
 VANILLA_TRACKS_PLACEMENTS_PATH = os.path.join(RESOURCES_DIR, VANILLA_TRACKS_FILE_NAME)
+VANILLA_SURFACES_FILE_NAME = "vanilla_surfaces.txt"
+VANILLA_SURFACES_PATH = os.path.join(RESOURCES_DIR, VANILLA_SURFACES_FILE_NAME)
+VANILLA_PROCOBJ_FILE_NAME = "vanilla_procobj.dat"
+VANILLA_PROCOBJ_PATH = os.path.join(RESOURCES_DIR, VANILLA_PROCOBJ_FILE_NAME)
+VANILLA_COLLISION_MIN_Z_FILE_NAME = "vanilla_collision_min_z.txt"
+VANILLA_COLLISION_MIN_Z_PATH = os.path.join(RESOURCES_DIR, VANILLA_COLLISION_MIN_Z_FILE_NAME)
+PROCOBJ_FILE_NAME = "procobj.dat"
+SURFINFO_FILE_NAME = "surfinfo.dat"
+PROCOBJ_IPL_FILE_NAME = "procobj.ipl"
+# The game cannot load more than 4096 objects from a single IPL file
+PROCOBJ_IPL_MAX_OBJECTS = 4000
+BIG_BUILDING_DRAW_DISTANCE = 300
 #endregion
 
 #region Global variables
+# Set from the GTA San Andreas folder chosen in the settings
+SA_DATA_DIR = ''
+SA_MODLOADER_DIR = ''
+
 fix_command = False
 id_command = False
-path_sapu_command = False
-path_sapde_command = False
+path_command = False
 remove_grge_command = False
 clean_assets_command = True
+procobj_command = False
 map_command = False
 map_command_x = 0
 map_command_y = 0
@@ -117,6 +125,7 @@ object_resources_renames = {}
 col_models_renames = {}
 dff_renames = {}
 txd_renames = {}
+ifp_renames = {}
 new_col_files = []
 free_ids = []
 vanilla_placements = []
@@ -130,6 +139,10 @@ vanilla_files_basenames = set()
 dff_new_basenames = set()
 col_models_new_basenames = set()
 txd_new_basenames = set()
+procobj_converter = None
+procobj_rules = []
+procobj_surfaces = set()
+procobj_collisions = {}
 
 img_console = IMGConsole()
 
@@ -163,11 +176,15 @@ def get_free_ids():
     global free_ids
     
     usable_ids = list(range(1, 65531))
-    ids_in_use = get_ids_in_use()
+    ids_in_use = set(get_ids_in_use())
     free_ids = [object_id for object_id in usable_ids if object_id not in ids_in_use]
     free_ids.sort()
 
 def get_ids_in_use():
+    if not os.path.isdir(SA_DATA_DIR):
+        print('WARNING: the GTA San Andreas folder is not set or was not found, so the IDs the game uses '
+              'cannot be read. Set it in the settings, or the mod may get IDs that are already taken.')
+
     for directory in [SA_DATA_DIR, SA_MODLOADER_DIR]:
         for root, dirs, files in os.walk(directory):
             for mod_file in files:
@@ -207,27 +224,59 @@ def get_ids_in_use():
         file_content = read_file(INVALID_IDS_PATH, file_encoding)
         
         for line in file_content:
-            line = int(line.strip())
-            if line not in ids_in_use:
-                ids_in_use.append(line)
+            if line.strip():
+                ids_in_use.append(int(line.strip()))
+
+    # The IDs of the original game are never free, even if no game folder could be read
+    ids_in_use.extend(vanilla_ids)
+    ids_in_use[:] = set(ids_in_use)
                 
     ids_in_use.sort()
                             
     return ids_in_use
 
+def get_game_dir():
+    if os.path.isfile(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f).get('game_dir', '')
+        except (OSError, ValueError):
+            print(f'Could not read {SETTINGS_PATH}')
+
+    return ''
+
+def set_game_dir(game_dir):
+    global SA_DATA_DIR
+    global SA_MODLOADER_DIR
+
+    SA_DATA_DIR = os.path.join(game_dir, "data") if game_dir else ''
+    SA_MODLOADER_DIR = os.path.join(game_dir, "modloader") if game_dir else ''
+
+def save_game_dir(game_dir):
+    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+        json.dump({'game_dir': game_dir}, f, indent=4)
+
+    set_game_dir(game_dir)
+
+    # The installed mods are shown on the map, so they are read again from the new folder
+    return get_installed_mods_coordinates(read_installed_placement_files())
+
 def process_files():
-    global fix_command, id_command, path_sapu_command, path_sapde_command
+    global fix_command, id_command, path_command
     global map_command, map_command_x, map_command_y, map_command_z, map_size
     global rot_command,rot_command_x, rot_command_y, rot_command_z, rot_command_w
     global remove_grge_command
     global clean_assets_command
-    
+    global procobj_command
+
     copy_files_to_output()
     root = customtkinter.CTk()
     root.title("GTA Map Tools")
     mod_coordinates = get_mod_coordinates(read_mod_placement_files())
     installed_mods_coordinates = get_installed_mods_coordinates(read_installed_placement_files())
-    app = MapGui(root, mod_coordinates, installed_mods_coordinates)
+    app = MapGui(root, mod_coordinates, installed_mods_coordinates,
+                 procobj_available=bool(get_input_file_path(PROCOBJ_FILE_NAME)),
+                 game_dir=get_game_dir(), save_game_dir_func=save_game_dir)
     root.mainloop()
     
     if app.map_coordinates and app.map_coordinates != (0.0, 0.0, 0.0):
@@ -252,16 +301,11 @@ def process_files():
     else:
         id_command = False
         
-    if app.path_sapu_command:
-        path_sapu_command = True
+    if app.path_command:
+        path_command = True
     else:
-        path_sapu_command = False
-        
-    if app.path_sapde_command:
-        path_sapde_command = True
-    else:
-        path_sapde_command = False
-        
+        path_command = False
+
     if app.remove_grge_command:
         remove_grge_command = True
     else:
@@ -274,19 +318,32 @@ def process_files():
         
     if app.map_size:
         map_size = app.map_size
-        
+
+    if app.procobj_command:
+        procobj_command = True
+    else:
+        procobj_command = False
+
     if clean_assets_command:
         clean_assets()
-        
+
     list_vanilla_files()
     get_vanilla_objects()
     get_vanilla_dat_objects()
     get_vanilla_water_placements()
     get_vanilla_tracks_placements()
     get_free_ids()
+
+    if procobj_command:
+        read_procobj_rules()
+
     uniquify_mod_files()
     read_map_files()
     uniquify_map_objects()
+
+    if procobj_command:
+        convert_procobj()
+
     list_objects_to_modify()
     modify_map_files()
     write_map_files()
@@ -326,15 +383,6 @@ def detect_file_encoding(file_path):
             result = chardet.detect(f.read())
             return result['encoding']
         
-def is_fastman_node_format(file_path):
-    with open(file_path, 'rb') as f:
-        bytes_data = f.read(8)
-
-        if len(bytes_data) >= 8 and bytes_data[4:8] == b"FM92":
-            return True
-        else:
-            return False
-
 def read_file(file_path, encoding):
     
     if encoding == 'binary':
@@ -425,22 +473,20 @@ def modify_map_files():
     global fix_command
     global id_command
     global map_command
-    global path_sapu_command, path_sapde_command
+    global path_command
     global remove_grge_command
-    
+
     if remove_grge_command:
         remove_grge_sections()
-        
+
     if fix_command:
         remove_unreferenced_objects()
     if id_command:
         update_ids()
     if map_command:
         modify_coordinates()
-        if path_sapu_command:
-            move_paths_sapu()
-        elif path_sapde_command:
-            move_paths_sapde()
+        if path_command:
+            move_paths()
         
     if rot_command:
         rotate_coordinates()
@@ -820,8 +866,7 @@ def clean_assets():
             file_extension = os.path.splitext(file_name)[1].lower()
             
             if file_extension not in ('.dff', '.txd', '.col'):
-                if (re.match(r'^nodes\d+\.dat$', file_name.lower()) and
-                    (path_sapu_command or path_sapde_command)):
+                if re.match(r'^nodes\d+\.dat$', file_name.lower()) and path_command:
                     continue
                     
                 os.chmod(file_path, stat.S_IWRITE)
@@ -854,7 +899,7 @@ def get_gta_dat_filenames():
     return gta_dat_file_names
 
 def uniquify_mod_files():
-    global path_sapu_command
+    global path_command
     global object_resources_renames
     global existent_binary_ipl_files
     unpacked_img_directories = []
@@ -923,29 +968,15 @@ def uniquify_mod_files():
                             other_file_paths.append(file_path)
     
     # Move every node file to a temporary location
-    if os.path.exists(SA_PATH_UTILITY_INPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_INPUT_DIR):
-        shutil.rmtree(SA_PATH_UTILITY_INPUT_DIR)
-        
-    if os.path.exists(SA_PATH_UTILITY_OUTPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_OUTPUT_DIR):
-        shutil.rmtree(SA_PATH_UTILITY_OUTPUT_DIR)
-        
-    if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-        shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
-        
-    if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
-        shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
-        
+    if os.path.exists(PATHS_TEMP_DIR) and os.path.isdir(PATHS_TEMP_DIR):
+        shutil.rmtree(PATHS_TEMP_DIR)
+
     if node_file_paths and map_command:
-        if path_sapu_command:
-            os.makedirs(SA_PATH_UTILITY_INPUT_DIR, exist_ok=True)
-            
+        if path_command:
+            os.makedirs(PATHS_TEMP_DIR, exist_ok=True)
+
             for file_path in node_file_paths:
-                shutil.move(file_path, SA_PATH_UTILITY_INPUT_DIR)
-        elif path_sapde_command:
-            os.makedirs(SA_PATHS_DATA_EXTENDER_INPUT_DIR, exist_ok=True)
-            
-            for file_path in node_file_paths:
-                shutil.move(file_path, SA_PATHS_DATA_EXTENDER_INPUT_DIR)
+                shutil.move(file_path, PATHS_TEMP_DIR)
     else:
         for file_path in node_file_paths:
             os.remove(file_path)
@@ -1000,70 +1031,195 @@ def uniquify_mod_files():
                 file_path = os.path.join(root, file)
                 uniquify_map_file(file_path)
 
-def move_paths_sapde():
-    global map_command_x
-    global map_command_y
-    global map_command_z
-    
-    if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-        for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-            node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_INPUT_DIR, node_file)
-            
-            if is_vanilla_file(node_file_path) or is_fastman_node_format(node_file_path):
-                os.remove(node_file_path)
-                
-        if any(os.scandir(SA_PATHS_DATA_EXTENDER_INPUT_DIR)):
-            os.makedirs(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, exist_ok=True)
-            pathsExtender = SAPathsDataExtender()
-            paths_moved = pathsExtender.run(map_command_x, map_command_y, map_command_z)
-            
-            if paths_moved:
-                os.makedirs(OUTPUT_PATHS_DIR, exist_ok=True)
-                
-            for node_file in os.listdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
-                node_file_path = os.path.join(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR, node_file)
-                
-                if os.path.isfile(node_file_path):
-                    shutil.move(node_file_path, os.path.join(OUTPUT_PATHS_DIR, node_file))
-                
-            if os.path.exists(SA_PATHS_DATA_EXTENDER_INPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_INPUT_DIR):
-                shutil.rmtree(SA_PATHS_DATA_EXTENDER_INPUT_DIR)
-                
-            if os.path.exists(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR) and os.path.isdir(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR):
-                shutil.rmtree(SA_PATHS_DATA_EXTENDER_OUTPUT_DIR)
-            
-def move_paths_sapu():
+def move_paths():
     global map_command_x
     global map_command_y
     global map_command_z
     global map_size
-    
-    if os.path.exists(SA_PATH_UTILITY_INPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_INPUT_DIR):
-        for node_file in os.listdir(SA_PATH_UTILITY_INPUT_DIR):
-            node_file_path = os.path.join(SA_PATH_UTILITY_INPUT_DIR, node_file)
-            
+
+    if os.path.exists(PATHS_TEMP_DIR) and os.path.isdir(PATHS_TEMP_DIR):
+        for node_file in os.listdir(PATHS_TEMP_DIR):
+            node_file_path = os.path.join(PATHS_TEMP_DIR, node_file)
+
             if is_vanilla_file(node_file_path):
                 os.remove(node_file_path)
+
+        if any(os.scandir(PATHS_TEMP_DIR)):
+            path_positioner = PathPositioner()
+            path_positioner.run(PATHS_TEMP_DIR, OUTPUT_PATHS_DIR, map_command_x, map_command_y, map_command_z, map_size)
+
+        shutil.rmtree(PATHS_TEMP_DIR)
+
+def get_input_file_path(file_name):
+    for root, dirs, files in os.walk(INPUT_DIR):
+        for mod_file in files:
+            if mod_file.lower() == file_name:
+                return os.path.join(root, mod_file)
+
+    return ''
+
+def get_game_procobj_path():
+    # A procobj.dat in modloader replaces the one from the game
+    for directory in [SA_MODLOADER_DIR, SA_DATA_DIR]:
+        for root, dirs, files in os.walk(directory):
+            for game_file in files:
+                if game_file.lower() == PROCOBJ_FILE_NAME:
+                    return os.path.join(root, game_file)
+
+    return VANILLA_PROCOBJ_PATH
+
+def read_procobj_rules():
+    global procobj_command
+    global procobj_converter
+    global procobj_rules
+    global procobj_surfaces
+
+    procobj_path = get_input_file_path(PROCOBJ_FILE_NAME)
+
+    if not procobj_path:
+        procobj_command = False
+        return
+
+    procobj_converter = ProcObjConverter(*ProcObjConverter.read_surfaces(VANILLA_SURFACES_PATH))
+    surfinfo_path = get_input_file_path(SURFINFO_FILE_NAME)
+
+    if surfinfo_path:
+        procobj_converter.read_surfinfo(surfinfo_path)
+
+    # The game already creates at runtime the objects of its own procobj.dat, also on the mod's map,
+    # so converting them as well would create them twice
+    game_procobj_path = get_game_procobj_path()
+    game_rules = {(rule['surface_id'], rule['model'].lower()) for rule in procobj_converter.read_rules(game_procobj_path)}
+    procobj_rules = []
+
+    for rule in procobj_converter.read_rules(procobj_path):
+        if rule['surface_id'] not in procobj_converter.object_surfaces:
+            print(f"(procobj.dat) {rule['surface']} does not create objects - Skipping {rule['model']}...")
+        elif rule['spacing'] <= 0:
+            print(f"(procobj.dat) Invalid spacing for {rule['surface']},{rule['model']} - Skipping...")
+        elif (rule['surface_id'], rule['model'].lower()) in game_rules:
+            print(f"(procobj.dat) {rule['surface']},{rule['model']} is already in {game_procobj_path} - Skipping...")
+        else:
+            procobj_rules.append(rule)
+
+    procobj_surfaces = {rule['surface_id'] for rule in procobj_rules}
+
+    if not procobj_rules:
+        print('(procobj.dat) No objects to convert.')
+        procobj_command = False
+
+def get_vanilla_collision_min_z():
+    vanilla_collision_min_z = {}
+
+    with open(VANILLA_COLLISION_MIN_Z_PATH, 'r', encoding='utf-8') as f:
+        for line in f:
+            model, min_z = line.strip().split(',')
+            vanilla_collision_min_z[model] = float(min_z)
+
+    return vanilla_collision_min_z
+
+def get_draw_distance(ide_object):
+    elements = ide_object.get_content_elements()
+
+    try:
+        if len(elements) == 5:
+            return float(elements[3])
+        else:
+            return max(float(element) for element in elements[4:-1])
+    except ValueError:
+        return 0.0
+
+def convert_procobj():
+    global mod_map_files
+
+    ide_objects_by_id = {}
+    ide_objects_by_model = {}
+    dynamic_models = set(vanilla_dat_objects)
+
+    for file in mod_map_files:
+        if isinstance(file, Ide):
+            for section in [file.section_objs, file.section_tobj, file.section_anim]:
+                for gta_object in section or []:
+                    ide_objects_by_id.setdefault(gta_object.obj_id, gta_object)
+                    ide_objects_by_model.setdefault(gta_object.model, gta_object)
+        elif isinstance(file, Dat) and file.section_datobj:
+            dynamic_models.update(gta_object.model for gta_object in file.section_datobj)
+
+    # Get the ID, the model name and the lowest collision point of the object of each rule. The ID is the
+    # one the mod was made with, as the game uses it to place the objects
+    vanilla_ids = {model: obj_id for obj_id, model in vanilla_objects.items()}
+    vanilla_collision_min_z = get_vanilla_collision_min_z()
+    rules_by_surface = {}
+
+    for rule in procobj_rules:
+        model = rule['model'].lower()
+        ide_object = ide_objects_by_model.get(dff_renames.get(model, model))
+
+        if ide_object:
+            obj_id = ide_object.obj_id
+            model = ide_object.model
+            min_z = procobj_collisions.get(model, (0.0, []))[0]
+        elif model in vanilla_ids:
+            obj_id = vanilla_ids[model]
+            min_z = vanilla_collision_min_z.get(model, 0.0)
+        else:
+            print(f"(procobj.dat) {rule['model']} is not declared in any IDE file - Skipping...")
+            continue
+
+        rules_by_surface.setdefault(rule['surface_id'], []).append((rule, obj_id, model, min_z))
+
+    # Create the objects on the collision of every building of the mod, which is what limits them
+    # to the mod's map
+    lines = []
+
+    for file in mod_map_files:
+        if not isinstance(file, (Ipl, IplBinary)) or not file.section_inst:
+            continue
+
+        for inst_object in file.section_inst:
+            ide_object = ide_objects_by_id.get(inst_object.obj_id)
+            model = ide_object.model if ide_object else inst_object.model
+            triangles = procobj_collisions.get(model, (0.0, []))[1]
+
+            if not triangles:
+                continue
+
+            # Only static buildings create objects, which leaves out timed and animated objects,
+            # the dynamic ones from object.dat and the LODs
+            if ((ide_object and (not isinstance(ide_object, Objs) or get_draw_distance(ide_object) > BIG_BUILDING_DRAW_DISTANCE)) or
+                model in dynamic_models or getattr(inst_object, 'is_lod', False)):
+                continue
+
+            if isinstance(inst_object, Inst) and get_placement(inst_object.get_content_elements()) in vanilla_placements:
+                continue
+
+            if isinstance(inst_object, Inst):
+                interior = int(float(inst_object.get_content_elements()[2])) & 0xFF
+                position = (inst_object.x_pos, inst_object.y_pos, inst_object.z_pos)
+                rotation = (inst_object.x_rot, inst_object.y_rot, inst_object.z_rot, inst_object.w_rot)
+            else:
+                # Binary objects are read again, as their attributes are rounded
+                elements = struct.unpack_from('<7f3i', inst_object.content)
+                interior = elements[8] & 0xFF
+                position = elements[0:3]
+                rotation = elements[3:7]
                 
-        if any(os.scandir(SA_PATH_UTILITY_INPUT_DIR)):
-            os.makedirs(SA_PATH_UTILITY_OUTPUT_DIR, exist_ok=True)
-            path_utility = SAPathUtility()
-            paths_moved = path_utility.run(map_command_x, map_command_y, map_command_z, map_size)
-            # pathUtility.close()
-            if any(Path(SA_PATH_UTILITY_OUTPUT_DIR).glob('*.*')):
-                os.makedirs(OUTPUT_PATHS_DIR, exist_ok=True)
-                
-                for node_file in os.listdir(SA_PATH_UTILITY_OUTPUT_DIR):
-                    node_file_path = os.path.join(SA_PATH_UTILITY_OUTPUT_DIR, node_file)
-                    
-                    if os.path.isfile(node_file_path):
-                        shutil.move(node_file_path, os.path.join(OUTPUT_PATHS_DIR, node_file))
-                    
-                if os.path.exists(SA_PATH_UTILITY_INPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_INPUT_DIR):
-                    shutil.rmtree(SA_PATH_UTILITY_INPUT_DIR)
-                    
-                if os.path.exists(SA_PATH_UTILITY_OUTPUT_DIR) and os.path.isdir(SA_PATH_UTILITY_OUTPUT_DIR):
-                    shutil.rmtree(SA_PATH_UTILITY_OUTPUT_DIR)
+            matrix = ProcObjConverter.get_instance_matrix(rotation)
+
+            for triangle in triangles:
+                vertices = procobj_converter.transform_triangle(triangle, position, matrix)
+
+                for rule, obj_id, rule_model, min_z in rules_by_surface.get(triangle[3], []):
+                    for obj_position, obj_rotation, flags in procobj_converter.generate_objects(rule, obj_id, min_z, vertices):
+                        lines.append(f'{obj_id}, {rule_model}, {interior | flags}, '
+                                     f'{obj_position[0]:.6f}, {obj_position[1]:.6f}, {obj_position[2]:.6f}, '
+                                     f'{obj_rotation[0]:.6f}, {obj_rotation[1]:.6f}, {obj_rotation[2]:.6f}, {obj_rotation[3]:.6f}, -1\n')
+
+    for i in range(0, len(lines), PROCOBJ_IPL_MAX_OBJECTS):
+        file_content = ['inst\n'] + lines[i:i + PROCOBJ_IPL_MAX_OBJECTS] + ['end\n']
+        mod_map_files.append(Ipl(rename_file(PROCOBJ_IPL_FILE_NAME), file_content))
+
+    print(f'(procobj.dat) {len(lines)} objects created from {sum(len(rules) for rules in rules_by_surface.values())} entries.')
 
 def uniquify_map_objects():
     global vanilla_dat_objects
@@ -1083,6 +1239,12 @@ def uniquify_map_objects():
                         if obj.texture in txd_renames:
                             obj.texture = txd_renames[obj.texture]
             
+            # Animated objects name the IFP file their animation is in
+            if file.section_anim:
+                for obj in file.section_anim:
+                    if obj.anim_file in ifp_renames:
+                        obj.anim_file = ifp_renames[obj.anim_file]
+
             if section_txdp:
                 for obj in section_txdp:
                     if obj.texture in txd_renames:
@@ -1354,6 +1516,8 @@ def uniquify_asset_file(file_path):
             dff_renames[base_name.lower()] = base_new_name
         elif file_type == '.txd':
             txd_renames[base_name.lower()] = base_new_name
+        elif file_type == '.ifp':
+            ifp_renames[base_name.lower()] = base_new_name
             
         file_new_name = base_new_name + file_type
         new_file_path = os.path.join(directory_path, file_new_name)
@@ -1369,9 +1533,40 @@ def uniquify_asset_file(file_path):
         
         if file_type == '.col':
             uniquify_col_models(new_file_path)
+        elif file_type == '.ifp':
+            rename_ifp_animation_block(new_file_path, base_new_name)
             
     if new_file_path:
         return new_file_path
+
+def rename_ifp_animation_block(file_path, new_name):
+    # An IFP file also keeps the name of its animation block inside, and the game only loads the
+    # animations if that name is the same as the name of the file
+    ANP3_NAME_INDEX = 8
+    ANP3_NAME_LENGTH = 24
+    ANPK_NAME_INDEX = 20
+
+    with open(file_path, 'rb') as ifp_file:
+        content = bytearray(ifp_file.read())
+
+    name = new_name.encode('ascii')
+
+    if content[:4] == b'ANP3':
+        content[ANP3_NAME_INDEX:ANP3_NAME_INDEX + ANP3_NAME_LENGTH] = name.ljust(ANP3_NAME_LENGTH, b'\x00')
+    elif content[:4] == b'ANPK' and content[8:12] == b'INFO':
+        # The name is as long as it needs to be, padded to 4 bytes, so the sizes change with it
+        info_size = struct.unpack_from('<I', content, 12)[0]
+        old_name_length = (info_size - 4 + 3) // 4 * 4
+        padded_name = name + b'\x00' * (4 - len(name) % 4)
+        content[ANPK_NAME_INDEX:ANPK_NAME_INDEX + old_name_length] = padded_name
+        struct.pack_into('<I', content, 12, 4 + len(name) + 1)
+        struct.pack_into('<I', content, 4, len(content) - 8)
+    else:
+        print(f'Unknown IFP format, animation block not renamed: {file_path}')
+        return
+
+    with open(file_path, 'wb') as ifp_file:
+        ifp_file.write(content)
 
 def uniquify_col_models(file_path):
     col_file_content = read_file(file_path, 'binary')
@@ -1391,7 +1586,12 @@ def uniquify_col_models(file_path):
             col_models_renames[col_entry_name] = col_entry_new_name
         
         col_entry.model = col_entry_new_name
-        
+
+    if procobj_command:
+        # The collisions are stored under the new names, as these are the ones the map files will use
+        for model, min_z, triangles in ProcObjConverter.read_collisions(col_file_content, procobj_surfaces):
+            procobj_collisions[col_models_renames.get(model, model).lower()] = (min_z, triangles)
+
     with open(file_path, 'wb') as modified_file:
         modified_file.write(col_file.write_file_sections())
 
@@ -1431,6 +1631,9 @@ def rename_file(file_name):
         file_type == '.col' or file_type == '.txd' or
         file_type =='.ipl' or file_type == '.ide')):
         base_name_start = base_name[:3]
+    elif file_type == '.ifp':
+        # The game only has room for 15 characters when it reads which IFP file an animated object uses
+        base_name_start = base_name[:8]
     else:
         base_name_start = base_name[:12]
         
@@ -1585,7 +1788,7 @@ def read_mod_placement_files():
 
 def read_installed_placement_files():
     mods_placement_files = {}
-    
+
     if os.path.exists(SA_MODLOADER_DIR):
         mods_directories = [modloader_item for modloader_item in os.listdir(SA_MODLOADER_DIR) if os.path.isdir(os.path.join(SA_MODLOADER_DIR, modloader_item))]
 
@@ -1594,25 +1797,25 @@ def read_installed_placement_files():
             mod_directory_path = os.path.join(SA_MODLOADER_DIR, mod_directory)
 
             mod_ipl_filepaths = [str(filepath) for filepath in Path(mod_directory_path).rglob("*.ipl")]
-            
+
             if mod_ipl_filepaths:
                 mod_placement_files = []
-                
+
                 for mod_ipl_filepath in mod_ipl_filepaths:
                     file_name = os.path.basename(mod_ipl_filepath)
                     file_encoding = detect_file_encoding(mod_ipl_filepath)
                     file_content = read_file(mod_ipl_filepath, file_encoding)
-                    
+
                     if file_encoding == 'binary':
                         file = IplBinary(file_name, file_content)
                     else:
                         file = Ipl(file_name, file_content)
 
                     mod_placement_files.append(file)
-                
+
                 if mod_placement_files:
                     mods_placement_files[mod_name] = mod_placement_files
-    
+
     return mods_placement_files
 
 def get_mod_coordinates(placement_files):
@@ -1799,7 +2002,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     fix_command = args.fix
     id_command = args.id
-    path_sapu_command = args.path
+    path_command = args.path
     map_command = args.map is not None
     map_command_x = args.map[0] if map_command else None
     map_command_y = args.map[1] if map_command else None
@@ -1811,7 +2014,8 @@ if __name__ == '__main__':
     rot_command_w = args.rot[3] if rot_command else None
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
+
+    set_game_dir(get_game_dir())
     get_vanilla_placements()
     process_files()
     build_mod_dat()

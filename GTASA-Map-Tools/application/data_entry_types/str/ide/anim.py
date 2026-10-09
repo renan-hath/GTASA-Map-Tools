@@ -5,6 +5,7 @@ class Anim(DataEntryStr):
     ID_INDEX = 0
     MODEL_INDEX = 1
     TEXTURE_INDEX = 2
+    ANIM_FILE_INDEX = 3
     
     def __init__(self, line, line_position, section, file):
         super().__init__(line, line_position, section, file)
@@ -13,6 +14,7 @@ class Anim(DataEntryStr):
         self._obj_id = int(elements[self.ID_INDEX])
         self._model = elements[self.MODEL_INDEX]
         self._texture = elements[self.TEXTURE_INDEX]
+        self._anim_file = elements[self.ANIM_FILE_INDEX]
 
     @property
     def obj_id(self):
@@ -39,4 +41,13 @@ class Anim(DataEntryStr):
     @texture.setter
     def texture(self, texture):
         self._texture = texture
-        super().update_content_element(self._texture, self.TEXTURE_INDEX)
+        super().update_content_element(self._texture, self.TEXTURE_INDEX)
+
+    @property
+    def anim_file(self):
+        return self._anim_file
+
+    @anim_file.setter
+    def anim_file(self, anim_file):
+        self._anim_file = anim_file
+        super().update_content_element(self._anim_file, self.ANIM_FILE_INDEX)
