@@ -238,6 +238,10 @@ class RadarGenerator:
     # Buildings are wider than this, and so are the objects that are not props, such as lamp posts
     BUILDING_MIN_HALF_WIDTH = 3
     PROP_MAX_HALF_WIDTH = 3
+    # Collisions this wide, of so few triangles and this flat, are planes of water or sky
+    BACKDROP_MIN_HALF_WIDTH = 1000
+    BACKDROP_MAX_TRIANGLES = 16
+    BACKDROP_MAX_HEIGHT = 1.0
     # A piece of land is wider than this and has less than this share of what faces up being
     # flat, as the roofs and the floors of the buildings are
     LAND_MIN_HALF_WIDTH = 60
@@ -272,6 +276,14 @@ class RadarGenerator:
     DIRT_MAX_BRIGHTNESS = 0.4
     SAND_MIN_SATURATION = 0.4
     SAND_MIN_BRIGHTNESS = 0.6
+
+    # The vanilla style draws the roads as strokes along the vehicle paths, where a map has them:
+    # the paved places on them are roads and the others near them are concrete
+    ROAD_STROKE_WIDTH = 6 * 500 / 256
+    PAVED_KINDS = (KIND_ROAD, KIND_CONCRETE, KIND_STRUCTURE, KIND_UNKNOWN)
+    ROAD_COVERAGE_RADIUS = 100
+    NODE_LINK_COUNT_MASK = 0xF
+    NODE_BOAT_FLAG = 0x80
 
     def __init__(self, game_dir, vanilla_file_names, is_vanilla_placement, surfaces_path):
         surface_ids, object_surfaces, water_surfaces = ProcObjConverter.read_surfaces(surfaces_path)
@@ -316,7 +328,9 @@ class RadarGenerator:
         """
         self.include_vanilla_map = include_vanilla_map
         self.tile_resolution = tile_resolution if tile_resolution in self.TILE_RESOLUTIONS else self.VANILLA_TILE_RESOLUTION
-        self.block_tiles = max(1, min(self.MAX_BLOCK_TILES, self.MAX_BLOCK_RESOLUTION // (self.tile_resolution * self.SUPERSAMPLING)))
+        # The vanilla style gives flat colors, which need no more than one sample per pixel
+        self.samples = 1 if style == self.STYLE_VANILLA else self.SUPERSAMPLING
+        self.block_tiles = max(1, min(self.MAX_BLOCK_TILES, self.MAX_BLOCK_RESOLUTION // (self.tile_resolution * self.samples)))
         self.texture_sample_size = min(self.TEXTURE_SAMPLE_SIZE * max(1, self.tile_resolution // self.VANILLA_TILE_RESOLUTION),
                                        self.MAX_TEXTURE_SAMPLE_SIZE)
         self.light_intensity = float(light_intensity)
@@ -359,6 +373,7 @@ class RadarGenerator:
         blocks, scene = self._assign_instances_to_blocks(instances, collisions, radar_map_size, tiles_per_row, progress)
         scene['atlas'] = np.stack(self._textures)
         scene['water_quads'] = water_quads
+        scene['road_segments'] = self._read_road_segments(mod_files) if style == self.STYLE_VANILLA else np.zeros((0, 4), np.float32)
         self._textures = []
         self._txd_cache = {}
 
@@ -461,7 +476,7 @@ class RadarGenerator:
     def _get_worker_state(self):
         # What a process needs to draw blocks, which leaves out the files that are open
         return {name: getattr(self, name) for name in ('tile_resolution', 'block_tiles', 'light_intensity',
-                                                       'water_color')}
+                                                       'water_color', 'samples')}
 
     def get_radar_map_size(self):
         # The radar map size of fastman92 Limit Adjuster sets how many tiles the game loads
@@ -822,7 +837,7 @@ class RadarGenerator:
                 background[row * tile_resolution:(row + 1) * tile_resolution,
                            col * tile_resolution:(col + 1) * tile_resolution] = tile
 
-        samples_count = self.SUPERSAMPLING * self.SUPERSAMPLING
+        samples_count = self.samples * self.samples
         empty_counts = (samples_count - sample_counts.astype(np.float64))[:, :, None]
         return np.round((color_sums + empty_counts * background) / samples_count).astype(np.uint8)
 
@@ -872,6 +887,7 @@ class RadarGenerator:
             return None
 
         triangles = collision_model['vertices'][collision_model['faces']].reshape(-1, 3, 3)
+        surfaces = np.asarray(collision_model['surfaces'], dtype=np.uint8)
         kinds = self._surface_kinds[collision_model['surfaces']]
         box_mins, box_maxs = collision_model['box_mins'], collision_model['box_maxs']
         has_walls = bool(len(box_mins))
@@ -895,6 +911,8 @@ class RadarGenerator:
             triangles = np.concatenate((triangles, tops[:, (0, 1, 2)], tops[:, (0, 2, 3)])).astype(np.float32)
             box_kinds = self._surface_kinds[collision_model['box_surfaces']]
             kinds = np.concatenate((kinds, box_kinds, box_kinds))
+            box_surfaces = np.asarray(collision_model['box_surfaces'], dtype=np.uint8)
+            surfaces = np.concatenate((surfaces, box_surfaces, box_surfaces))
 
         if not len(triangles):
             return None
@@ -903,13 +921,18 @@ class RadarGenerator:
         half_width = float(np.abs(triangles[:, :, :2]).max())
         is_prop = half_width < self.PROP_MAX_HALF_WIDTH and not np.isin(kinds, self.GROUND_KINDS).any()
 
+        # A few flat triangles kilometres wide are a plane of water or sky around a map, not land
+        if half_width > self.BACKDROP_MIN_HALF_WIDTH and len(triangles) <= self.BACKDROP_MAX_TRIANGLES:
+            heights = triangles[:, :, 2]
+            is_prop = is_prop or float(heights.max() - heights.min()) <= self.BACKDROP_MAX_HEIGHT
+
         if has_walls and not is_land:
             # What could be a roof is only marked, as it also takes being above the ground around it
             lowest = min(triangles[:, :, 2].min(), box_mins[:, 2].min() if len(box_mins) else np.inf)
             roofs = np.isin(kinds, self.ROOF_KINDS) & (triangles[:, :, 2].max(axis=1) >= lowest + self.BUILDING_MIN_HEIGHT)
             kinds = np.where(roofs, kinds | self.ROOF_FLAG, kinds).astype(np.uint8)
 
-        return {'triangles': triangles, 'kinds': kinds, 'is_prop': is_prop,
+        return {'triangles': triangles, 'kinds': kinds, 'surfaces': surfaces, 'is_prop': is_prop,
                 'radius': float(np.linalg.norm(triangles.reshape(-1, 3), axis=1).max())}
 
     def _assign_instances_to_blocks(self, instances, collisions, radar_map_size, tiles_per_row, progress):
@@ -998,6 +1021,7 @@ class RadarGenerator:
             'triangle_colors': join([model['triangle_colors'] for model in models], (0, 4), np.uint8),
             'collision_triangles': join([collision['triangles'] for collision in collisions], (0, 3, 3), np.float32),
             'collision_kinds': join([collision['kinds'] for collision in collisions], (0,), np.uint8),
+            'collision_surfaces': join([collision['surfaces'] for collision in collisions], (0,), np.uint8),
             'collision_ranges': get_ranges([len(collision['triangles']) for collision in collisions]),
         }
 
@@ -1499,20 +1523,7 @@ class RadarGenerator:
 
     # Drawing
 
-    def _render_block(self, block, scene, style):
-        """
-        Draws the objects of a block. Returns its row and column, and for each of its pixels
-        the sum of the colors of its samples that an object covers and how many they are.
-        """
-        block_row, block_col, block_instances, radar_map_size = block
-        half = radar_map_size / 2
-        samples = self.SUPERSAMPLING
-        resolution = self.block_tiles * self.tile_resolution * samples
-        units_per_pixel = self.TILE_WORLD_SIZE / (self.tile_resolution * samples)
-        left = -half + block_col * self.block_tiles * self.TILE_WORLD_SIZE
-        top = half - block_row * self.block_tiles * self.TILE_WORLD_SIZE
-        view = (left, top, units_per_pixel, resolution)
-
+    def _get_placements(self, block_instances):
         placements = []
 
         for model_index, collision_index, rotation, position in block_instances:
@@ -1520,64 +1531,243 @@ class RadarGenerator:
             placements.append((model_index, collision_index, np.array((right, forward, up), dtype=np.float32),
                                np.array(position, dtype=np.float32)))
 
-        depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
-        color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
+        return placements
 
-        if style == self.STYLE_VANILLA:
-            collision_triangles = []
-            collision_kinds = []
+    def _get_block_view(self, block):
+        # The left and the top of a block in the world, the size of its pixels and how many they are on each side
+        block_row, block_col, block_instances, radar_map_size = block
+        half = radar_map_size / 2
+        samples = self.samples
+        resolution = self.block_tiles * self.tile_resolution * samples
+        units_per_pixel = self.TILE_WORLD_SIZE / (self.tile_resolution * samples)
+        left = -half + block_col * self.block_tiles * self.TILE_WORLD_SIZE
+        top = half - block_row * self.block_tiles * self.TILE_WORLD_SIZE
+        return left, top, units_per_pixel, resolution
 
-            for model_index, collision_index, matrix, position in placements:
-                start, end = scene['collision_ranges'][collision_index]
-                collision_triangles.append(scene['collision_triangles'][start:end] @ matrix + position)
-                collision_kinds.append(scene['collision_kinds'][start:end])
-
-            collision_triangles = np.concatenate(collision_triangles)
-            collision_depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
-            kinds = np.full(resolution * resolution, self.KIND_NONE, dtype=np.uint8)
-
-            self._rasterize((collision_triangles[:, :, 0] - left) / units_per_pixel,
-                            (top - collision_triangles[:, :, 1]) / units_per_pixel,
-                            collision_triangles[:, :, 2], resolution, collision_depth,
-                            labels=np.concatenate(collision_kinds), label_buffer=kinds)
-            del collision_triangles
-
-            # The models are only needed where the collision does not tell what the radar shows
-            kinds = kinds.reshape(resolution, resolution)
-            textured_kinds = ((kinds & self.ROOF_FLAG) != 0) | np.isin(kinds, self.TEXTURED_KINDS)
-
-            if textured_kinds.any():
-                # Their own colors are used, as how they are lit says nothing about what they are
-                self._draw_models(placements, scene, view, depth, color, None, textured_kinds)
-
-            color, covered = self._paint_vanilla_style(kinds, collision_depth.reshape(resolution, resolution),
-                                                       color, depth >= collision_depth - self.MODEL_MAX_DEPTH)
-            depth = collision_depth
-        else:
-            self._draw_models(placements, scene, view, depth, color, self.light_intensity)
-            covered = depth > -np.inf
-
+    def _get_water_levels(self, view, scene):
         # The sea outside the original map is everywhere, while inside it only the water of
         # water.dat files is
-        water_level = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+        left, top, units_per_pixel, resolution = view
+        water_levels = np.full(resolution * resolution, -np.inf, dtype=np.float32)
         pixel_x = left + (np.arange(resolution) + 0.5) * units_per_pixel
         pixel_y = top - (np.arange(resolution) + 0.5) * units_per_pixel
         vanilla_half = self.VANILLA_MAP_SIZE / 2
         outside = ((np.abs(pixel_y)[:, None] > vanilla_half) | (np.abs(pixel_x)[None, :] > vanilla_half)).ravel()
-        water_level[outside] = 0.0
+        water_levels[outside] = 0.0
         water_quads = scene['water_quads']
 
         if len(water_quads):
             self._rasterize((water_quads[:, :, 0] - left) / units_per_pixel, (top - water_quads[:, :, 1]) / units_per_pixel,
-                            water_quads[:, :, 2], resolution, water_level)
+                            water_quads[:, :, 2], resolution, water_levels)
 
-        color[covered & (depth < water_level)] = self.water_color
+        return water_levels
+
+    def _render_block(self, block, scene, style):
+        """
+        Draws the objects of a block. Returns its row and column, and for each of its pixels
+        the sum of the colors of its samples that an object covers and how many they are.
+        """
+        block_row, block_col = block[0], block[1]
+        view = self._get_block_view(block)
+        units_per_pixel, resolution = view[2], view[3]
+        samples = self.samples
+
+        if style == self.STYLE_VANILLA:
+            color, covered, depth, water_levels = self._render_vanilla_style(block, scene, view)
+        else:
+            placements = self._get_placements(block[2])
+            depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+            color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
+
+            self._draw_models(placements, scene, view, depth, color, self.light_intensity)
+            covered = depth > -np.inf
+
+            water_levels = self._get_water_levels(view, scene)
+
+        color[covered & (depth < water_levels)] = self.water_color
         color[~covered] = 0
 
         size = resolution // samples
         color_sums = color.reshape(size, samples, size, samples, 3).sum(axis=(1, 3), dtype=np.uint16)
         sample_counts = covered.reshape(size, samples, size, samples).sum(axis=(1, 3), dtype=np.uint8)
         return block_row, block_col, color_sums, sample_counts
+
+    def _render_vanilla_style(self, block, scene, view):
+        """
+        The vanilla style: the hand-made rules tell what each pixel shows, and near the vehicle
+        paths, if the map has them, the paved places on their strokes are roads and the others
+        concrete. Returns the color of each pixel, which ones it draws, the height of the
+        collision there and the water level.
+        """
+        resolution = view[3]
+        depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+        color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
+        color, covered, depth, kinds = self._render_vanilla_rules(self._get_placements(block[2]), scene, view, depth, color)
+        road_segments = scene['road_segments']
+
+        if len(road_segments):
+            strokes, near = self._draw_road_strokes(road_segments, view)
+            paved = covered & np.isin(kinds, self.PAVED_KINDS) & near
+            color[paved & strokes] = self.VANILLA_PALETTE[self.KIND_ROAD]
+            color[paved & ~strokes] = self.VANILLA_PALETTE[self.KIND_CONCRETE]
+
+        return color, covered, depth, self._get_water_levels(view, scene)
+
+    def _draw_road_strokes(self, road_segments, view):
+        """
+        Returns which pixels of a view the strokes of the roads cover, and which ones are near
+        the vehicle paths at all, where the strokes tell the roads from the rest.
+        """
+        left, top, units_per_pixel, resolution = view
+        right, bottom = left + resolution * units_per_pixel, top - resolution * units_per_pixel
+        reach = self.ROAD_COVERAGE_RADIUS
+        x0, y0, x1, y1 = road_segments[:, 0], road_segments[:, 1], road_segments[:, 2], road_segments[:, 3]
+        shown = ((np.maximum(x0, x1) >= left - reach) & (np.minimum(x0, x1) <= right + reach) &
+                 (np.maximum(y0, y1) >= bottom - reach) & (np.minimum(y0, y1) <= top + reach))
+        strokes = Image.new('L', (resolution, resolution), 0)
+        near = Image.new('L', (resolution, resolution), 0)
+
+        if shown.any():
+            from PIL import ImageDraw
+
+            stroke_width = max(1, round(self.ROAD_STROKE_WIDTH / units_per_pixel))
+            near_width = max(1, round(2 * reach / units_per_pixel))
+            draw_strokes, draw_near = ImageDraw.Draw(strokes), ImageDraw.Draw(near)
+
+            for segment in road_segments[shown]:
+                points = [((segment[0] - left) / units_per_pixel, (top - segment[1]) / units_per_pixel),
+                          ((segment[2] - left) / units_per_pixel, (top - segment[3]) / units_per_pixel)]
+
+                for draw, width in ((draw_strokes, stroke_width), (draw_near, near_width)):
+                    draw.line(points, fill=255, width=width)
+
+                    # Round ends, so the strokes of a road join at its bends
+                    for x, y in points:
+                        draw.ellipse((x - width / 2, y - width / 2, x + width / 2, y + width / 2), fill=255)
+
+        return np.asarray(strokes).ravel() > 0, np.asarray(near).ravel() > 0
+
+    def _read_road_segments(self, mod_files):
+        """
+        Returns the links between the vehicle nodes of the paths of the game, as the two ends of
+        each one, from the node files the game would load: the ones of the mods, which replace
+        the ones of the original map with the same name, and those only if the original map is drawn.
+        """
+        from application.tools.path_positioner import PathPositioner
+
+        positioner = PathPositioner()
+        node_files = {}
+        modloader_dir_length = len(self.modloader_dir) + 1
+
+        def is_excluded(path):
+            return path[modloader_dir_length:].split(os.sep)[0].lower() in self.excluded_mods
+
+        for archive in self._archives:
+            is_vanilla = not archive.file_path.startswith(self.modloader_dir)
+
+            if (is_vanilla and not self.include_vanilla_map) or (not is_vanilla and is_excluded(archive.file_path)):
+                continue
+
+            for name in archive.entries:
+                match = PathPositioner.NODE_FILE_PATTERN.match(name)
+
+                if match:
+                    node_files[int(match.group(1))] = (name, archive, name)
+
+        for file_path in mod_files:
+            match = PathPositioner.NODE_FILE_PATTERN.match(os.path.basename(file_path))
+
+            if match and not is_excluded(file_path):
+                node_files[int(match.group(1))] = (os.path.basename(file_path), None, file_path)
+
+        areas = {}
+
+        for area, (name, archive, path) in node_files.items():
+            try:
+                if archive is None:
+                    with open(path, 'rb') as node_file:
+                        data = node_file.read()
+                else:
+                    data = archive.read(path)
+
+                layout = positioner._detect_layout(name, data)
+                counts = positioner._read_counts(data, layout)
+
+                if not counts[0]:
+                    continue
+
+                node_file = {'name': name, 'data': data, 'layout': layout, 'counts': counts}
+                nodes_start, _, links_start = positioner._get_sections(node_file)[:3]
+            except (OSError, PathPositioner.UnsupportedFormatError, struct.error) as error:
+                print(f'Could not read the paths of {name} ({error})')
+                continue
+
+            records = np.frombuffer(data, dtype=np.uint8, count=counts[0] * layout['node_size'],
+                                    offset=nodes_start).reshape(counts[0], layout['node_size'])
+            position_type = np.int16 if layout['pos_format'] == '<h' else np.int32
+            position_size = np.dtype(position_type).itemsize
+            positions = records[:, layout['node_pos']:layout['node_pos'] + 2 * position_size].copy().view(position_type)
+            positions = positions.reshape(-1, 2).astype(np.float32) / PathPositioner.COORD_SCALE
+            link_starts = records[:, 16:18].copy().view(np.uint16).ravel()
+            flags = records[:, 24:28].copy().view(np.uint32).ravel()
+            links = np.frombuffer(data, dtype=np.uint16, count=counts[4] * 2, offset=links_start).reshape(-1, 2)
+            areas[area] = (positions, link_starts, flags, links, counts[1])
+
+        segments = set()
+
+        for area, (positions, link_starts, flags, links, vehicle_count) in areas.items():
+            for node in range(vehicle_count):
+                if flags[node] & self.NODE_BOAT_FLAG:
+                    continue
+
+                for link in links[link_starts[node]:link_starts[node] + (flags[node] & self.NODE_LINK_COUNT_MASK)]:
+                    other_area, other_node = int(link[0]), int(link[1])
+                    other = areas.get(other_area)
+
+                    if other is None or other_node >= other[4] or other[2][other_node] & self.NODE_BOAT_FLAG:
+                        continue
+
+                    ends = sorted(((area, node), (other_area, other_node)))
+                    segments.add((ends[0], ends[1]))
+
+        return np.array([(*areas[a][0][i], *areas[b][0][j]) for (a, i), (b, j) in segments],
+                        dtype=np.float32).reshape(-1, 4)
+
+    def _render_vanilla_rules(self, placements, scene, view, depth, color):
+        """
+        The hand-made rules of the vanilla style. Returns the color of each pixel, which ones it
+        draws, the height of the collision there and the kind of thing it shows.
+        """
+        left, top, units_per_pixel, resolution = view
+        collision_triangles = []
+        collision_kinds = []
+
+        for model_index, collision_index, matrix, position in placements:
+            start, end = scene['collision_ranges'][collision_index]
+            collision_triangles.append(scene['collision_triangles'][start:end] @ matrix + position)
+            collision_kinds.append(scene['collision_kinds'][start:end])
+
+        collision_triangles = np.concatenate(collision_triangles)
+        collision_depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+        kinds = np.full(resolution * resolution, self.KIND_NONE, dtype=np.uint8)
+
+        self._rasterize((collision_triangles[:, :, 0] - left) / units_per_pixel,
+                        (top - collision_triangles[:, :, 1]) / units_per_pixel,
+                        collision_triangles[:, :, 2], resolution, collision_depth,
+                        labels=np.concatenate(collision_kinds), label_buffer=kinds)
+        del collision_triangles
+
+        # The models are only needed where the collision does not tell what the radar shows
+        kinds = kinds.reshape(resolution, resolution)
+        textured_kinds = ((kinds & self.ROOF_FLAG) != 0) | np.isin(kinds, self.TEXTURED_KINDS)
+
+        if textured_kinds.any():
+            # Their own colors are used, as how they are lit says nothing about what they are
+            self._draw_models(placements, scene, view, depth, color, None, textured_kinds)
+
+        color, covered, kinds = self._paint_vanilla_style(kinds, collision_depth.reshape(resolution, resolution),
+                                                   color, depth >= collision_depth - self.MODEL_MAX_DEPTH)
+        return color, covered, collision_depth, kinds
 
     def _draw_models(self, placements, scene, view, depth, color, light_intensity, needed=None):
         """
@@ -1645,7 +1835,7 @@ class RadarGenerator:
         color of the models there.
         """
         resolution = kinds.shape[0]
-        units_per_pixel = self.TILE_WORLD_SIZE / (self.tile_resolution * self.SUPERSAMPLING)
+        units_per_pixel = self.TILE_WORLD_SIZE / (self.tile_resolution * self.samples)
         textured = textured.reshape(resolution, resolution)
         roofs = (kinds & self.ROOF_FLAG) != 0
         kinds = kinds & ~np.uint8(self.ROOF_FLAG)
@@ -1735,7 +1925,7 @@ class RadarGenerator:
         palette[self.KIND_WATER] = self.water_color
 
         kinds = kinds.ravel()
-        return palette[kinds], kinds != self.KIND_NONE
+        return palette[kinds], kinds != self.KIND_NONE, kinds
 
     @staticmethod
     def _sum_around(values, radius):
@@ -1753,7 +1943,7 @@ class RadarGenerator:
         there is no ground around, it is as low as it can be.
         """
         resolution = heights.shape[0]
-        cell_size = round(self.GROUND_CELL_SIZE * self.tile_resolution * self.SUPERSAMPLING / self.TILE_WORLD_SIZE)
+        cell_size = round(self.GROUND_CELL_SIZE * self.tile_resolution * self.samples / self.TILE_WORLD_SIZE)
         cells = resolution // cell_size
         # The sea covers what is under it
         ground_heights = np.where(ground, np.maximum(heights, 0.0), 0.0)
