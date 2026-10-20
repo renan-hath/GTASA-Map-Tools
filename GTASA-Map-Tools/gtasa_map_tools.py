@@ -42,8 +42,10 @@ from application.file_types.str.ipl import Ipl
 from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
 from application.tools.img_console import IMGConsole
+from application.tools.path_generator import PathGenerator
 from application.tools.path_positioner import PathPositioner
 from application.tools.procobj_converter import ProcObjConverter
+from application.tools.radar_generator import RadarGenerator
 
 #region Constants
 SETTINGS_PATH = "settings.json"
@@ -54,6 +56,7 @@ OUTPUT_ASSETS_DIR = os.path.join(OUTPUT_DIR, "assets")
 OUTPUT_MAP_DIR = os.path.join(OUTPUT_DIR, "map")
 OUTPUT_PATHS_DIR = os.path.join(OUTPUT_DIR, "gta3.img")
 PATHS_TEMP_DIR = os.path.join(OUTPUT_DIR, "paths_temp")
+OUTPUT_RADAR_DIR = os.path.join("radar_files", "gta3.img")
 RESOURCES_DIR = "resources"
 IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
 IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
@@ -96,6 +99,7 @@ SA_MODLOADER_DIR = ''
 fix_command = False
 id_command = False
 path_command = False
+generate_paths_command = False
 remove_grge_command = False
 clean_assets_command = True
 procobj_command = False
@@ -235,15 +239,58 @@ def get_ids_in_use():
                             
     return ids_in_use
 
-def get_game_dir():
+def get_settings():
     if os.path.isfile(SETTINGS_PATH):
         try:
             with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f).get('game_dir', '')
+                return json.load(f)
         except (OSError, ValueError):
             print(f'Could not read {SETTINGS_PATH}')
 
-    return ''
+    return {}
+
+def save_settings(**changes):
+    # The settings that are not being changed are kept
+    settings = get_settings()
+    settings.update(changes)
+
+    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, indent=4)
+
+def get_game_dir():
+    return get_settings().get('game_dir', '')
+
+def get_radar_settings():
+    settings = get_settings()
+
+    return {
+        'radar_style': settings.get('radar_style', RadarGenerator.STYLE_REALISTIC),
+        'radar_resolution': settings.get('radar_resolution', RadarGenerator.VANILLA_TILE_RESOLUTION),
+        'radar_light_intensity': settings.get('radar_light_intensity', 1.0),
+        # The mods that are left out are the ones saved, so the ones installed later are on the radar
+        'radar_excluded_mods': settings.get('radar_excluded_mods', []),
+    }
+
+def save_radar_settings(radar_settings):
+    save_settings(**radar_settings)
+
+def list_radar_mods(game_dir):
+    # The map mods are the folders of modloader that place objects
+    modloader_dir = os.path.join(game_dir, "modloader") if game_dir else ''
+    radar_mods = []
+
+    if os.path.isdir(modloader_dir):
+        for mod_directory in sorted(os.listdir(modloader_dir), key=str.lower):
+            mod_directory_path = os.path.join(modloader_dir, mod_directory)
+
+            # Modloader ignores the folders whose name starts with a dot
+            if not os.path.isdir(mod_directory_path) or mod_directory.startswith('.'):
+                continue
+
+            if any(file_name.lower().endswith('.ipl') for root, dirs, files in os.walk(mod_directory_path) for file_name in files):
+                radar_mods.append(mod_directory)
+
+    return radar_mods
 
 def set_game_dir(game_dir):
     global SA_DATA_DIR
@@ -253,16 +300,25 @@ def set_game_dir(game_dir):
     SA_MODLOADER_DIR = os.path.join(game_dir, "modloader") if game_dir else ''
 
 def save_game_dir(game_dir):
-    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
-        json.dump({'game_dir': game_dir}, f, indent=4)
-
+    save_settings(game_dir=game_dir)
     set_game_dir(game_dir)
 
     # The installed mods are shown on the map, so they are read again from the new folder
     return get_installed_mods_coordinates(read_installed_placement_files())
 
+def generate_radar(map_size, radar_settings, progress):
+    if not vanilla_files:
+        list_vanilla_files()
+
+    radar_generator = RadarGenerator(os.path.dirname(SA_DATA_DIR), vanilla_files.keys(),
+                                     lambda elements: get_placement(elements) in vanilla_placements,
+                                     VANILLA_SURFACES_PATH)
+    return radar_generator.run(map_size, OUTPUT_RADAR_DIR, progress, radar_settings['radar_style'],
+                               radar_settings['radar_resolution'], radar_settings['radar_light_intensity'],
+                               radar_settings['radar_excluded_mods'])
+
 def process_files():
-    global fix_command, id_command, path_command
+    global fix_command, id_command, path_command, generate_paths_command
     global map_command, map_command_x, map_command_y, map_command_z, map_size
     global rot_command,rot_command_x, rot_command_y, rot_command_z, rot_command_w
     global remove_grge_command
@@ -276,7 +332,10 @@ def process_files():
     installed_mods_coordinates = get_installed_mods_coordinates(read_installed_placement_files())
     app = MapGui(root, mod_coordinates, installed_mods_coordinates,
                  procobj_available=bool(get_input_file_path(PROCOBJ_FILE_NAME)),
-                 game_dir=get_game_dir(), save_game_dir_func=save_game_dir)
+                 game_dir=get_game_dir(), save_game_dir_func=save_game_dir,
+                 generate_radar_func=generate_radar,
+                 radar_settings=get_radar_settings(), save_radar_settings_func=save_radar_settings,
+                 list_radar_mods_func=list_radar_mods)
     root.mainloop()
     
     if app.map_coordinates and app.map_coordinates != (0.0, 0.0, 0.0):
@@ -305,6 +364,11 @@ def process_files():
         path_command = True
     else:
         path_command = False
+
+    if app.generate_paths_command:
+        generate_paths_command = True
+    else:
+        generate_paths_command = False
 
     if app.remove_grge_command:
         remove_grge_command = True
@@ -348,6 +412,10 @@ def process_files():
     modify_map_files()
     write_map_files()
     repack_inst_binary_files()
+
+    # Paths are generated last, from where the objects of the map end up
+    if generate_paths_command:
+        generate_paths()
 
 def read_map_files():
     global mod_map_files
@@ -818,9 +886,11 @@ def copy_files_to_output():
     gta_dat_file_names = get_gta_dat_filenames()
     gta_dat_file_names = [file_name.lower() for file_name in gta_dat_file_names]
     
+    skipped_files = []
+
     if os.path.exists(OUTPUT_DIR) and os.path.isdir(OUTPUT_DIR):
         shutil.rmtree(OUTPUT_DIR)
-    
+
     for root, dirs, files in os.walk(INPUT_DIR):
         for mod_file in files:
             file_path = os.path.join(root, mod_file)
@@ -854,11 +924,28 @@ def copy_files_to_output():
                 else:
                     file_output_dir = OUTPUT_ASSETS_DIR
                     
-                os.chmod(file_path, stat.S_IWRITE)
                 os.makedirs(file_output_dir, exist_ok=True)
-                shutil.copy(os.path.join(root, mod_file), file_output_dir)
-                
+
+                # A file that cannot be read, such as one the antivirus blocks, is left out
+                try:
+                    os.chmod(file_path, stat.S_IWRITE)
+                    shutil.copy(file_path, file_output_dir)
+                except OSError as error:
+                    skipped_files.append((file_path, error))
+
+    if skipped_files:
+        print(f"Could not copy {len(skipped_files)} file(s), skipping:")
+
+        for file_path, error in skipped_files:
+            print(f"  {file_path} ({error.strerror or error})")
+
+        print("Files that cannot be read are usually being blocked by the antivirus.")
+
 def clean_assets():
+    # Mods with only map files have no assets
+    if not os.path.isdir(OUTPUT_ASSETS_DIR):
+        return
+
     for file_name in os.listdir(OUTPUT_ASSETS_DIR):
         file_path = os.path.join(OUTPUT_ASSETS_DIR, file_name)
         
@@ -1049,6 +1136,57 @@ def move_paths():
             path_positioner.run(PATHS_TEMP_DIR, OUTPUT_PATHS_DIR, map_command_x, map_command_y, map_command_z, map_size)
 
         shutil.rmtree(PATHS_TEMP_DIR)
+
+def generate_paths():
+    ide_models = {}
+
+    for file in mod_map_files:
+        if isinstance(file, Ide):
+            for section in [file.section_objs, file.section_tobj, file.section_anim]:
+                for gta_object in section or []:
+                    ide_models.setdefault(gta_object.obj_id, gta_object.model)
+
+    instances = []
+
+    for file in mod_map_files:
+        if not isinstance(file, (Ipl, IplBinary)) or not file.section_inst:
+            continue
+
+        for inst_object in file.section_inst:
+            # LODs have no collision
+            if getattr(inst_object, 'is_lod', False):
+                continue
+
+            if isinstance(inst_object, Inst):
+                interior = int(float(inst_object.get_content_elements()[2])) & 0xFF
+                position = (inst_object.x_pos, inst_object.y_pos, inst_object.z_pos)
+                rotation = (inst_object.x_rot, inst_object.y_rot, inst_object.z_rot, inst_object.w_rot)
+            else:
+                # Binary objects are read again, as their attributes are rounded
+                elements = struct.unpack_from('<7f3i', inst_object.content)
+                interior = elements[8] & 0xFF
+                position = elements[0:3]
+                rotation = elements[3:7]
+
+            if interior not in PathGenerator.EXTERIOR_INTERIORS:
+                continue
+
+            model = ide_models.get(inst_object.obj_id) or vanilla_objects.get(inst_object.obj_id) or inst_object.model
+            instances.append((model, position, rotation))
+
+    # The collision of the map is in its IMG and COL files
+    collision_files = []
+
+    for directory in [OUTPUT_IMG_DIR, OUTPUT_ASSETS_DIR]:
+        if os.path.isdir(directory):
+            for file_name in os.listdir(directory):
+                file_path = os.path.join(directory, file_name)
+
+                if os.path.isfile(file_path) and file_name.lower().endswith(('.img', '.col')):
+                    collision_files.append(file_path)
+
+    path_generator = PathGenerator(os.path.dirname(SA_DATA_DIR), VANILLA_SURFACES_PATH)
+    path_generator.run(instances, collision_files, OUTPUT_PATHS_DIR, map_size)
 
 def get_input_file_path(file_name):
     for root, dirs, files in os.walk(INPUT_DIR):

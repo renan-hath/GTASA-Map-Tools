@@ -1,6 +1,8 @@
 import os
 import math
 import random
+import threading
+import traceback
 
 import customtkinter as ctk
 import tkinter as tk
@@ -14,15 +16,30 @@ SECTION_PADY = 10
 SOURCE_RESOLUTION = 2048  # Resolution used to pre-render the point layers
 RESIZE_DEBOUNCE_MS = 150  # Delay after the last resize event before re-rendering
 RESIZE_THRESHOLD = 6      # Minimum pixel change that triggers a re-render
+RADAR_POLL_MS = 200       # How often the radar generation progress is shown
+# The radar styles, by the name they are shown with
+RADAR_STYLES = {"Realistic": "realistic", "Vanilla": "vanilla"}
+# The resolutions of each radar tile, by the name they are shown with
+RADAR_RESOLUTIONS = {"128": 128, "256 (original)": 256, "512": 512, "1024": 1024}
+RADAR_LIGHT_RANGE = (0.25, 3.0)
+RADAR_LIGHT_STEP = 0.05
 
 
 class MapGui:
     def __init__(self, root, get_coordinates_func, installed_coordinates, map_size=6000, args=None, procobj_available=False,
-                 game_dir='', save_game_dir_func=None):
+                 game_dir='', save_game_dir_func=None, generate_radar_func=None,
+                 radar_settings=None, save_radar_settings_func=None, list_radar_mods_func=None):
         self.root = root
         self.game_dir = game_dir
         self.save_game_dir_func = save_game_dir_func
+        self.generate_radar_func = generate_radar_func
+        self.radar_settings = self._get_valid_radar_settings(radar_settings or {})
+        self.save_radar_settings_func = save_radar_settings_func
+        self.list_radar_mods_func = list_radar_mods_func
+        self.radar_mods_window = None
         self.settings_window = None
+        self._radar_thread = None
+        self._radar_status = ''
 
         self.start_x = 0
         self.start_y = 0
@@ -66,6 +83,7 @@ class MapGui:
         self.fix_command = True
         self.id_command = True
         self.path_command = False
+        self.generate_paths_command = False
         self.remove_grge_command = True
         self.clean_assets_command = True
         self.procobj_command = False
@@ -74,6 +92,7 @@ class MapGui:
         self.fix_invalid_var = ctk.BooleanVar(value=True)
         self.replace_ids_var = ctk.BooleanVar(value=True)
         self.move_paths_var = ctk.BooleanVar(value=False)
+        self.generate_paths_var = ctk.BooleanVar(value=False)
         self.remove_grge_var = ctk.BooleanVar(value=True)
         self.clean_assets_var = ctk.BooleanVar(value=True)
         self.convert_procobj_var = ctk.BooleanVar(value=procobj_available)
@@ -91,6 +110,11 @@ class MapGui:
                                                    variable=self.move_paths_var,
                                                    command=self.adapt_gui_to_move_paths)
         self.checkbox_move_paths.pack(fill="x", pady=2)
+
+        self.checkbox_generate_paths = ctk.CTkCheckBox(self.options_section, text="Generate paths",
+                                                       variable=self.generate_paths_var,
+                                                       command=self.adapt_gui_to_generate_paths)
+        self.checkbox_generate_paths.pack(fill="x", pady=2)
 
         self.checkbox_remove_grge = ctk.CTkCheckBox(self.options_section, text="Remove new garages",
                                                     variable=self.remove_grge_var)
@@ -293,6 +317,16 @@ class MapGui:
         self.actions_section = ctk.CTkFrame(self.sidebar, corner_radius=10)
         self.actions_section.pack(fill="x", pady=(0, 6))
 
+        self.radar_button = ctk.CTkButton(self.actions_section, text="Generate radar",
+                                          command=self.generate_radar, height=34,
+                                          corner_radius=10)
+        self.radar_button.pack(fill="x", padx=12, pady=(12, 0))
+
+        self.radar_status_label = ctk.CTkLabel(self.actions_section, text="", wraplength=280,
+                                               justify="left", anchor="w",
+                                               text_color=("gray30", "gray60"))
+        self.radar_status_label.pack(fill="x", padx=12)
+
         self.save_button = ctk.CTkButton(self.actions_section, text="Save",
                                          command=self.save_data, height=40,
                                          font=(FONT_FAMILY, 13, "bold"),
@@ -390,6 +424,8 @@ class MapGui:
         self.path_command = self.move_paths_var.get()
 
         if self.move_paths_var.get():
+            # Moved and generated paths would end up in the same node files
+            self.generate_paths_var.set(False)
             self.update_offsets_for_paths()
             self.update_coordinate_labels()
             self.entry_angle.configure(state=tk.DISABLED)
@@ -405,6 +441,12 @@ class MapGui:
             self.entry_qz.configure(state=tk.NORMAL)
             self.entry_qw.configure(state=tk.NORMAL)
             self.rotation_slider.configure(state=tk.NORMAL)
+
+    def adapt_gui_to_generate_paths(self):
+        # Generated paths follow the map wherever it is placed, so they replace the moved ones
+        if self.generate_paths_var.get() and self.move_paths_var.get():
+            self.move_paths_var.set(False)
+            self.adapt_gui_to_move_paths()
 
     # Settings
 
@@ -440,6 +482,78 @@ class MapGui:
         error_label = ctk.CTkLabel(window, text="", text_color=("#b3261e", "#f2b8b5"), anchor="w")
         error_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=SECTION_PADX * 2, pady=(4, 0))
 
+        radar_section = ctk.CTkFrame(window, corner_radius=10, border_width=1, border_color=("gray75", "gray25"))
+        radar_section.grid(row=3, column=0, columnspan=2, sticky="ew", padx=SECTION_PADX * 2, pady=(4, 4))
+        radar_section.grid_columnconfigure(1, weight=1)
+
+        radar_heading = ctk.CTkLabel(radar_section, text="RADAR GENERATION", font=(FONT_FAMILY, 11, "bold"),
+                                     text_color=("gray25", "gray70"))
+        radar_heading.grid(row=0, column=0, columnspan=3, sticky="w", padx=SECTION_PADX, pady=(8, 4))
+
+        def add_radar_label(row, text):
+            radar_label = ctk.CTkLabel(radar_section, text=text, anchor="w")
+            radar_label.grid(row=row, column=0, sticky="w", padx=(SECTION_PADX, 12), pady=4)
+
+        add_radar_label(1, "Style:")
+        radar_style_names = {style: name for name, style in RADAR_STYLES.items()}
+        radar_style_var = ctk.StringVar(value=radar_style_names[self.radar_settings['radar_style']])
+        radar_style_menu = ctk.CTkOptionMenu(radar_section, values=list(RADAR_STYLES), variable=radar_style_var,
+                                             dynamic_resizing=False,
+                                             command=lambda style_name: update_light_state())
+        radar_style_menu.grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, SECTION_PADX), pady=4)
+
+        add_radar_label(2, "Tile resolution:")
+        radar_resolution_names = {resolution: name for name, resolution in RADAR_RESOLUTIONS.items()}
+        radar_resolution_var = ctk.StringVar(value=radar_resolution_names[self.radar_settings['radar_resolution']])
+        radar_resolution_menu = ctk.CTkOptionMenu(radar_section, values=list(RADAR_RESOLUTIONS),
+                                                  variable=radar_resolution_var, dynamic_resizing=False)
+        radar_resolution_menu.grid(row=2, column=1, columnspan=2, sticky="w", padx=(0, SECTION_PADX), pady=4)
+
+        add_radar_label(3, "Lighting intensity:")
+        light_min, light_max = RADAR_LIGHT_RANGE
+        light_value_label = ctk.CTkLabel(radar_section, text="", width=44, anchor="e")
+        light_value_label.grid(row=3, column=2, sticky="e", padx=(6, SECTION_PADX), pady=4)
+
+        def show_light_value(value):
+            light_value_label.configure(text=f"{float(value):.2f}x")
+
+        light_slider = ctk.CTkSlider(radar_section, from_=light_min, to=light_max,
+                                     number_of_steps=round((light_max - light_min) / RADAR_LIGHT_STEP),
+                                     command=show_light_value)
+        light_slider.set(self.radar_settings['radar_light_intensity'])
+        light_slider.grid(row=3, column=1, sticky="ew", pady=4)
+        show_light_value(light_slider.get())
+
+        def update_light_state():
+            # Only the realistic style lights the objects
+            is_realistic = RADAR_STYLES[radar_style_var.get()] == 'realistic'
+            light_slider.configure(state=tk.NORMAL if is_realistic else tk.DISABLED)
+            light_value_label.configure(text_color=("gray10", "gray90") if is_realistic else ("gray55", "gray45"))
+
+        update_light_state()
+
+        add_radar_label(4, "Mods on the radar:")
+        excluded_mods = set(self.radar_settings['radar_excluded_mods'])
+        mods_count_label = ctk.CTkLabel(radar_section, text="", anchor="w", text_color=("gray30", "gray60"))
+        mods_count_label.grid(row=5, column=0, columnspan=3, sticky="w", padx=SECTION_PADX, pady=(0, 8))
+
+        def list_mods():
+            if not self.list_radar_mods_func:
+                return []
+            return self.list_radar_mods_func(game_dir_entry.get().strip())
+
+        def show_mods_count():
+            mods = list_mods()
+            selected_count = len([mod for mod in mods if mod not in excluded_mods])
+            mods_count_label.configure(text=f"{selected_count} of {len(mods)} map mods selected")
+
+        def select_mods():
+            self._open_radar_mods_window(window, list_mods(), excluded_mods, show_mods_count)
+
+        mods_button = ctk.CTkButton(radar_section, text="Select mods...", width=120, command=select_mods)
+        mods_button.grid(row=4, column=1, columnspan=2, sticky="w", padx=(0, SECTION_PADX), pady=4)
+        show_mods_count()
+
         def save():
             game_dir = game_dir_entry.get().strip()
 
@@ -449,6 +563,15 @@ class MapGui:
                 return
 
             self.game_dir = game_dir
+            self.radar_settings = {
+                'radar_style': RADAR_STYLES[radar_style_var.get()],
+                'radar_resolution': RADAR_RESOLUTIONS[radar_resolution_var.get()],
+                'radar_light_intensity': round(light_slider.get(), 2),
+                'radar_excluded_mods': sorted(excluded_mods),
+            }
+
+            if self.save_radar_settings_func:
+                self.save_radar_settings_func(self.radar_settings)
 
             if self.save_game_dir_func:
                 self.installed_coordinates = self.save_game_dir_func(game_dir)
@@ -460,11 +583,137 @@ class MapGui:
 
         save_button = ctk.CTkButton(window, text="Save", command=save,
                                     font=(FONT_FAMILY, 13, "bold"))
-        save_button.grid(row=3, column=0, columnspan=2, sticky="e", padx=SECTION_PADX * 2, pady=(8, 16))
+        save_button.grid(row=5, column=0, columnspan=2, sticky="e", padx=SECTION_PADX * 2, pady=(8, 16))
 
         # Wait until the window is shown, otherwise it cannot take the focus
         window.after(100, window.grab_set)
         window.after(100, game_dir_entry.focus)
+
+    @staticmethod
+    def _get_valid_radar_settings(radar_settings):
+        # The settings file can be edited by hand or come from an older version
+        style = radar_settings.get('radar_style')
+        resolution = radar_settings.get('radar_resolution')
+        excluded_mods = radar_settings.get('radar_excluded_mods')
+
+        try:
+            light_intensity = float(radar_settings.get('radar_light_intensity', 1.0))
+        except (TypeError, ValueError):
+            light_intensity = 1.0
+
+        if not isinstance(excluded_mods, list):
+            excluded_mods = []
+
+        return {
+            'radar_style': style if style in RADAR_STYLES.values() else 'realistic',
+            'radar_resolution': resolution if resolution in RADAR_RESOLUTIONS.values() else 256,
+            'radar_light_intensity': min(max(light_intensity, RADAR_LIGHT_RANGE[0]), RADAR_LIGHT_RANGE[1]),
+            'radar_excluded_mods': [mod for mod in excluded_mods if isinstance(mod, str)],
+        }
+
+    def _open_radar_mods_window(self, parent, mods, excluded_mods, on_change):
+        """
+        Shows every map mod of modloader with a tickbox. The ones that are unticked are added to
+        the excluded mods, which are the ones the radar is not generated for.
+        """
+        if self.radar_mods_window is not None and self.radar_mods_window.winfo_exists():
+            self.radar_mods_window.focus()
+            return
+
+        window = ctk.CTkToplevel(parent)
+        window.title("Select mods")
+        window.geometry("420x520")
+        window.transient(parent)
+        window.grid_columnconfigure(1, weight=1)
+        window.grid_rowconfigure(1, weight=1)
+        self.radar_mods_window = window
+
+        label = ctk.CTkLabel(window, text="The radar is generated for the selected map mods:", anchor="w")
+        label.grid(row=0, column=0, columnspan=3, sticky="w", padx=SECTION_PADX * 2, pady=(16, 4))
+
+        mods_frame = ctk.CTkScrollableFrame(window)
+        mods_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=SECTION_PADX * 2, pady=4)
+        mod_vars = {}
+
+        for mod in mods:
+            mod_vars[mod] = ctk.BooleanVar(value=mod not in excluded_mods)
+            mod_tickbox = ctk.CTkCheckBox(mods_frame, text=mod, variable=mod_vars[mod])
+            mod_tickbox.pack(anchor="w", padx=6, pady=4)
+
+        if not mods:
+            empty_label = ctk.CTkLabel(mods_frame, text="No map mods were found in the modloader folder.",
+                                       text_color=("gray30", "gray60"))
+            empty_label.pack(anchor="w", padx=6, pady=4)
+
+        def select_all(selected):
+            for mod_var in mod_vars.values():
+                mod_var.set(selected)
+
+        def close():
+            window.destroy()
+            # The settings window is the one that had the focus
+            parent.grab_set()
+
+        def confirm():
+            # The mods that are not listed, such as the ones of another game folder, stay as they were
+            for mod, mod_var in mod_vars.items():
+                if mod_var.get():
+                    excluded_mods.discard(mod)
+                else:
+                    excluded_mods.add(mod)
+
+            on_change()
+            close()
+
+        all_button = ctk.CTkButton(window, text="Select all", width=100, command=lambda: select_all(True))
+        all_button.grid(row=2, column=0, sticky="w", padx=(SECTION_PADX * 2, 6), pady=(8, 16))
+        none_button = ctk.CTkButton(window, text="Select none", width=100, command=lambda: select_all(False))
+        none_button.grid(row=2, column=1, sticky="w", pady=(8, 16))
+        confirm_button = ctk.CTkButton(window, text="OK", width=100, command=confirm,
+                                       font=(FONT_FAMILY, 13, "bold"))
+        confirm_button.grid(row=2, column=2, sticky="e", padx=SECTION_PADX * 2, pady=(8, 16))
+        window.protocol("WM_DELETE_WINDOW", close)
+
+        window.after(100, window.grab_set)
+
+    # Radar
+
+    def generate_radar(self):
+        if not self.generate_radar_func or (self._radar_thread and self._radar_thread.is_alive()):
+            return
+
+        if not self.game_dir:
+            self.radar_status_label.configure(text="Set the GTA San Andreas folder in the settings first.")
+            return
+
+        # Generating takes a while, so it runs apart from the window to keep it responsive
+        self.radar_button.configure(state=tk.DISABLED)
+        self.save_button.configure(state=tk.DISABLED)
+        self._radar_status = "Starting..."
+        self._radar_thread = threading.Thread(target=self._run_radar_generation,
+                                              args=(int(self.map_size_var.get()), dict(self.radar_settings)), daemon=True)
+        self._radar_thread.start()
+        self._poll_radar_generation()
+
+    def _run_radar_generation(self, map_size, radar_settings):
+        def progress(status):
+            print(status)
+            self._radar_status = status
+
+        try:
+            self.generate_radar_func(map_size, radar_settings, progress)
+        except Exception as error:
+            traceback.print_exc()
+            self._radar_status = f"Radar generation failed: {error}"
+
+    def _poll_radar_generation(self):
+        self.radar_status_label.configure(text=self._radar_status)
+
+        if self._radar_thread.is_alive():
+            self.root.after(RADAR_POLL_MS, self._poll_radar_generation)
+        else:
+            self.radar_button.configure(state=tk.NORMAL)
+            self.save_button.configure(state=tk.NORMAL)
 
     # Map interaction
 
@@ -633,6 +882,7 @@ class MapGui:
         self.fix_command = self.fix_invalid_var.get()
         self.id_command = self.replace_ids_var.get()
         self.path_command = self.move_paths_var.get()
+        self.generate_paths_command = self.generate_paths_var.get()
         self.remove_grge_command = self.remove_grge_var.get()
         self.clean_assets_command = self.clean_assets_var.get()
         self.procobj_command = self.convert_procobj_var.get()
