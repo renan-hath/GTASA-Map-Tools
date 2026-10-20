@@ -97,7 +97,8 @@ class RadarGenerator:
     That is the realistic style. The vanilla style draws them as the radar of the original game
     does instead, with one flat color for each kind of ground: the kind comes from the surfaces
     of the collision of the objects, and from the color of their textures where the collision
-    does not tell it. The objects without collision are not drawn in this style.
+    does not tell it. The objects without collision are not drawn in this style, except for the
+    LODs that no object points to, which fill what the other objects leave empty.
     """
 
     STYLE_REALISTIC = 'realistic'
@@ -246,6 +247,10 @@ class RadarGenerator:
     # flat, as the roofs and the floors of the buildings are
     LAND_MIN_HALF_WIDTH = 60
     LAND_MAX_FLAT_SHARE = 0.3
+    # And anything wider than this is land, as no building is that big, however flat it is
+    LAND_ANY_SHAPE_MIN_HALF_WIDTH = 220
+    # What the colors of a LOD tell is the kind most of it has within this many units
+    LOW_DETAIL_VOTE_RADIUS = 24
     FLAT_MIN_NORMAL_Z = 0.995
     # No roof has the color of these kinds of ground
     GROUND_COLOR_KINDS = (KIND_DARK_GRASS, KIND_LIGHT_GRASS, KIND_SAND)
@@ -288,7 +293,8 @@ class RadarGenerator:
     def __init__(self, game_dir, vanilla_file_names, is_vanilla_placement, surfaces_path):
         surface_ids, object_surfaces, water_surfaces = ProcObjConverter.read_surfaces(surfaces_path)
         self._surface_kinds = np.full(256, self.KIND_STRUCTURE, dtype=np.uint8)
-        self._surface_kinds[surface_ids.get('DEFAULT', 0)] = self.KIND_UNKNOWN
+        self._default_surface = surface_ids.get('DEFAULT', 0)
+        self._surface_kinds[self._default_surface] = self.KIND_UNKNOWN
 
         for kind, names in self.SURFACE_KINDS.items():
             for name in names:
@@ -652,12 +658,17 @@ class RadarGenerator:
                 instances.append(entry)
 
         for file_name, entries in text_ipls.items():
+            # The binary IPL files of the original map are only read if it is drawn, so only then
+            # are all the objects that point to the LODs of its files known
+            links_known = self.include_vanilla_map or file_name not in self.vanilla_file_names
+
             for index, entry in enumerate(entries):
                 if index in lod_indices[file_name]:
                     continue
                 if not self.include_vanilla_map and self.is_vanilla_placement(entry['elements']):
                     continue
 
+                entry['links_known'] = links_known
                 instances.append(entry)
 
         valid_instances = []
@@ -670,8 +681,15 @@ class RadarGenerator:
 
             model = ide_object[0]
 
-            # LODs that no object points to still have the name they are given by convention
-            if model.startswith('lod') or 'seabed' in model:
+            if 'seabed' in model:
+                continue
+
+            # A LOD that no object points to is the only model of what it shows, such as the land
+            # far away that cannot be reached, so the game shows it at any distance. It is drawn
+            # only where nothing else is, in case an object that points to it was not found
+            entry['stand_in'] = model.startswith('lod')
+
+            if entry['stand_in'] and not entry.get('links_known'):
                 continue
 
             entry['ide_object'] = ide_object
@@ -900,8 +918,10 @@ class RadarGenerator:
             has_walls = has_walls or areas[walls].sum() > areas.sum() * self.BUILDING_MIN_WALL_SHARE
             # The hills and the cliffs of a piece of land are not the walls and the roof of a building
             flat = np.abs(normals[:, 2]) > areas * self.FLAT_MIN_NORMAL_Z
-            is_land = (float(np.abs(triangles[:, :, :2]).max()) > self.LAND_MIN_HALF_WIDTH and
-                       areas[flat].sum() < areas[~walls].sum() * self.LAND_MAX_FLAT_SHARE)
+            triangles_half_width = float(np.abs(triangles[:, :, :2]).max())
+            is_land = ((triangles_half_width > self.LAND_MIN_HALF_WIDTH and
+                        areas[flat].sum() < areas[~walls].sum() * self.LAND_MAX_FLAT_SHARE) or
+                       triangles_half_width > self.LAND_ANY_SHAPE_MIN_HALF_WIDTH)
 
         if len(box_mins):
             x0, y0 = box_mins[:, 0], box_mins[:, 1]
@@ -935,6 +955,16 @@ class RadarGenerator:
         return {'triangles': triangles, 'kinds': kinds, 'surfaces': surfaces, 'is_prop': is_prop,
                 'radius': float(np.linalg.norm(triangles.reshape(-1, 3), axis=1).max())}
 
+    def _build_stand_in_collision(self, model):
+        # The model itself, with the surface that says nothing, so the color of its textures
+        # tells what it is
+        faces = np.asarray(model['triangles'], dtype=np.int64).reshape(-1, 3)
+        empty_boxes = np.zeros((0, 3), dtype=np.float32)
+        return self._build_collision({
+            'vertices': np.asarray(model['vertices'], dtype=np.float32), 'faces': faces,
+            'surfaces': np.full(len(faces), self._default_surface, dtype=np.uint8),
+            'box_mins': empty_boxes, 'box_maxs': empty_boxes, 'box_surfaces': np.zeros(0, dtype=np.uint8)})
+
     def _assign_instances_to_blocks(self, instances, collisions, radar_map_size, tiles_per_row, progress):
         """
         Returns the blocks that have objects, each one with its row, its column and the objects
@@ -956,14 +986,23 @@ class RadarGenerator:
                 progress(f'Reading the models... ({i}/{len(models)})')
             self._get_model(ide_object)
 
+        stand_in_collisions = {}
+
         for entry in instances:
             ide_object = entry['ide_object']
             model = self._model_cache.get(ide_object)
             collision = None
+            stand_in = entry.get('stand_in', False)
 
             if collisions is not None:
-                # What has no collision is decoration, which the vanilla style does not show
+                # What has no collision is decoration, which the vanilla style does not show,
+                # except for the LODs that stand in for land, which have no collision either
                 collision = collisions.get(ide_object[0].lower())
+
+                if collision is None and stand_in and model is not None:
+                    if ide_object not in stand_in_collisions:
+                        stand_in_collisions[ide_object] = self._build_stand_in_collision(model)
+                    collision = stand_in_collisions[ide_object]
 
                 if collision is None or collision['is_prop']:
                     continue
@@ -984,7 +1023,7 @@ class RadarGenerator:
 
             block_instance = (model_indices.get(ide_object, -1) if model is not None else -1,
                               collision_indices.get(ide_object[0], -1) if collision is not None else -1,
-                              entry['rotation'], entry['position'])
+                              entry['rotation'], entry['position'], stand_in)
 
             x, y = entry['position'][0], entry['position'][1]
             first_col = int((x - radius + half) // block_world_size)
@@ -1524,14 +1563,17 @@ class RadarGenerator:
     # Drawing
 
     def _get_placements(self, block_instances):
+        # The objects, and apart from them the LODs that only show where nothing else does
         placements = []
+        stand_ins = []
 
-        for model_index, collision_index, rotation, position in block_instances:
+        for model_index, collision_index, rotation, position, stand_in in block_instances:
             right, forward, up = ProcObjConverter.get_instance_matrix(rotation)
-            placements.append((model_index, collision_index, np.array((right, forward, up), dtype=np.float32),
-                               np.array(position, dtype=np.float32)))
+            (stand_ins if stand_in else placements).append(
+                (model_index, collision_index, np.array((right, forward, up), dtype=np.float32),
+                 np.array(position, dtype=np.float32)))
 
-        return placements
+        return placements, stand_ins
 
     def _get_block_view(self, block):
         # The left and the top of a block in the world, the size of its pixels and how many they are on each side
@@ -1575,11 +1617,20 @@ class RadarGenerator:
         if style == self.STYLE_VANILLA:
             color, covered, depth, water_levels = self._render_vanilla_style(block, scene, view)
         else:
-            placements = self._get_placements(block[2])
+            placements, stand_ins = self._get_placements(block[2])
             depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
             color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
 
             self._draw_models(placements, scene, view, depth, color, self.light_intensity)
+
+            if stand_ins:
+                stand_in_depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+                stand_in_color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
+                self._draw_models(stand_ins, scene, view, stand_in_depth, stand_in_color, self.light_intensity)
+                filled = (depth == -np.inf) & (stand_in_depth > -np.inf)
+                depth[filled] = stand_in_depth[filled]
+                color[filled] = stand_in_color[filled]
+
             covered = depth > -np.inf
 
             water_levels = self._get_water_levels(view, scene)
@@ -1602,7 +1653,8 @@ class RadarGenerator:
         resolution = view[3]
         depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
         color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
-        color, covered, depth, kinds = self._render_vanilla_rules(self._get_placements(block[2]), scene, view, depth, color)
+        placements, stand_ins = self._get_placements(block[2])
+        color, covered, depth, kinds = self._render_vanilla_rules(placements, scene, view, depth, color, stand_ins)
         road_segments = scene['road_segments']
 
         if len(road_segments):
@@ -1733,12 +1785,54 @@ class RadarGenerator:
         return np.array([(*areas[a][0][i], *areas[b][0][j]) for (a, i), (b, j) in segments],
                         dtype=np.float32).reshape(-1, 4)
 
-    def _render_vanilla_rules(self, placements, scene, view, depth, color):
+    def _render_vanilla_rules(self, placements, scene, view, depth, color, stand_ins=()):
         """
         The hand-made rules of the vanilla style. Returns the color of each pixel, which ones it
-        draws, the height of the collision there and the kind of thing it shows.
+        draws, the height of the collision there and the kind of thing it shows. The stand-ins
+        are only drawn where the collision of the other objects does not reach.
         """
+        resolution = view[3]
+        collision_depth, kinds = self._rasterize_collisions(placements, scene, view)
+        filled = np.zeros(resolution * resolution, dtype=bool)
+
+        if stand_ins:
+            stand_in_depth, stand_in_kinds = self._rasterize_collisions(stand_ins, scene, view)
+            filled = (kinds == self.KIND_NONE) & (stand_in_depth > -np.inf)
+            collision_depth[filled] = stand_in_depth[filled]
+            kinds[filled] = stand_in_kinds[filled]
+
+        # The models are only needed where the collision does not tell what the radar shows
+        kinds = kinds.reshape(resolution, resolution)
+        filled = filled.reshape(resolution, resolution)
+        textured_kinds = ((kinds & self.ROOF_FLAG) != 0) | np.isin(kinds, self.TEXTURED_KINDS)
+
+        if (textured_kinds & ~filled).any():
+            # Their own colors are used, as how they are lit says nothing about what they are
+            self._draw_models(placements, scene, view, depth, color, None, textured_kinds & ~filled)
+
+        # Some maps give the collision of their land to an object with an empty model, and its
+        # looks to a LOD on its own, so the stand-ins also show where the models do not
+        shown = (depth >= collision_depth - self.MODEL_MAX_DEPTH).reshape(resolution, resolution)
+        needed = textured_kinds & (filled | ~shown)
+        used = np.zeros(resolution * resolution, dtype=bool)
+
+        if stand_ins and needed.any():
+            stand_in_depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+            stand_in_color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
+            self._draw_models(stand_ins, scene, view, stand_in_depth, stand_in_color, None, needed)
+            used = needed.ravel() & (filled.ravel() | (stand_in_depth >= collision_depth - self.MODEL_MAX_DEPTH))
+            depth[used] = stand_in_depth[used]
+            color[used] = stand_in_color[used]
+
+        color, covered, kinds = self._paint_vanilla_style(kinds, collision_depth.reshape(resolution, resolution),
+                                                   color, depth >= collision_depth - self.MODEL_MAX_DEPTH, used)
+        return color, covered, collision_depth, kinds
+
+    def _rasterize_collisions(self, placements, scene, view):
+        # The height of the highest collision on each pixel and its kind of ground
         left, top, units_per_pixel, resolution = view
+        collision_depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+        kinds = np.full(resolution * resolution, self.KIND_NONE, dtype=np.uint8)
         collision_triangles = []
         collision_kinds = []
 
@@ -1747,27 +1841,14 @@ class RadarGenerator:
             collision_triangles.append(scene['collision_triangles'][start:end] @ matrix + position)
             collision_kinds.append(scene['collision_kinds'][start:end])
 
-        collision_triangles = np.concatenate(collision_triangles)
-        collision_depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
-        kinds = np.full(resolution * resolution, self.KIND_NONE, dtype=np.uint8)
+        if collision_triangles:
+            collision_triangles = np.concatenate(collision_triangles)
+            self._rasterize((collision_triangles[:, :, 0] - left) / units_per_pixel,
+                            (top - collision_triangles[:, :, 1]) / units_per_pixel,
+                            collision_triangles[:, :, 2], resolution, collision_depth,
+                            labels=np.concatenate(collision_kinds), label_buffer=kinds)
 
-        self._rasterize((collision_triangles[:, :, 0] - left) / units_per_pixel,
-                        (top - collision_triangles[:, :, 1]) / units_per_pixel,
-                        collision_triangles[:, :, 2], resolution, collision_depth,
-                        labels=np.concatenate(collision_kinds), label_buffer=kinds)
-        del collision_triangles
-
-        # The models are only needed where the collision does not tell what the radar shows
-        kinds = kinds.reshape(resolution, resolution)
-        textured_kinds = ((kinds & self.ROOF_FLAG) != 0) | np.isin(kinds, self.TEXTURED_KINDS)
-
-        if textured_kinds.any():
-            # Their own colors are used, as how they are lit says nothing about what they are
-            self._draw_models(placements, scene, view, depth, color, None, textured_kinds)
-
-        color, covered, kinds = self._paint_vanilla_style(kinds, collision_depth.reshape(resolution, resolution),
-                                                   color, depth >= collision_depth - self.MODEL_MAX_DEPTH)
-        return color, covered, collision_depth, kinds
+        return collision_depth, kinds
 
     def _draw_models(self, placements, scene, view, depth, color, light_intensity, needed=None):
         """
@@ -1828,7 +1909,7 @@ class RadarGenerator:
                         triangles[:, :, 2], resolution, depth, color, uvs, vertex_colors, textures, material_colors,
                         scene['atlas'], light_intensity=light_intensity)
 
-    def _paint_vanilla_style(self, kinds, heights, textured_color, textured):
+    def _paint_vanilla_style(self, kinds, heights, textured_color, textured, low_detail=None):
         """
         Returns the color the vanilla style gives to each pixel and which pixels it draws, from
         the kind of ground the collision gave them and, where it does not tell it, from the
@@ -1850,6 +1931,9 @@ class RadarGenerator:
         textured_pixels = np.nonzero((textured_kinds & textured).ravel())[0]
         color_kinds[textured_pixels] = self._get_color_kinds(textured_color[textured_pixels])
         color_kinds = color_kinds.reshape(resolution, resolution)
+
+        if low_detail is not None and low_detail.any():
+            color_kinds = self._get_low_detail_kinds(color_kinds, low_detail.reshape(resolution, resolution), units_per_pixel)
 
         # The widths of the roads and the bridges are measured in bigger pixels
         coarse = max(1, round(self.COARSE_PIXEL_SIZE / units_per_pixel))
@@ -1926,6 +2010,21 @@ class RadarGenerator:
 
         kinds = kinds.ravel()
         return palette[kinds], kinds != self.KIND_NONE, kinds
+
+    def _get_low_detail_kinds(self, color_kinds, low_detail, units_per_pixel):
+        # A LOD gives each of its big faces its own texture, so what its colors tell is the kind
+        # most of it has around each point
+        radius = max(1, round(self.LOW_DETAIL_VOTE_RADIUS / units_per_pixel))
+        most_votes = np.zeros(color_kinds.shape, dtype=np.int64)
+        voted = color_kinds.copy()
+
+        for kind in np.unique(color_kinds[low_detail]):
+            votes = self._sum_around(low_detail & (color_kinds == kind), radius)
+            more = low_detail & (votes > most_votes)
+            voted[more] = kind
+            most_votes[more] = votes[more]
+
+        return voted
 
     @staticmethod
     def _sum_around(values, radius):
