@@ -108,13 +108,20 @@ class RadarGenerator:
     VANILLA_MAP_SIZE = 6000
     VANILLA_TILES_PER_ROW = 12
     VANILLA_TILE_RESOLUTION = 256
-    TILE_RESOLUTIONS = (128, 256, 512, 1024)
+    TILE_RESOLUTIONS = (128, 256, 512, 1024, 2048)
+    # Tiles bigger than this are drawn at a smaller size and then enlarged, which keeps the
+    # edges smooth at a small part of the time and memory drawing every pixel would take. The
+    # tiles that nothing is drawn on are written at the size of the original radar instead
+    MAX_DRAWN_TILE_RESOLUTION = 1024
+    ENLARGED_TILE_DRAWN_RESOLUTION = 512
+    UNDRAWN_TILE_RESOLUTION = 128
     SUPERSAMPLING = 2
     # The tiles are drawn in blocks of as many as fit in this many samples a side, up to this many
     MAX_BLOCK_TILES = 4
     MAX_BLOCK_RESOLUTION = 2048
-    # Blocks are drawn by several processes at once. Each one needs its own memory to draw on
-    MAX_WORKERS = 8
+    # Blocks are drawn by several processes at once. Each one needs its own memory to draw on,
+    # about half a GB, so they are few enough to keep the whole radar within a few GB
+    MAX_WORKERS = 4
     # Textures are reduced to this size, enough for a pixel that covers about one unit of the map,
     # and to more than that when the tiles have more pixels than the ones of the original radar
     TEXTURE_SAMPLE_SIZE = 32
@@ -251,6 +258,11 @@ class RadarGenerator:
     LAND_ANY_SHAPE_MIN_HALF_WIDTH = 220
     # What the colors of a LOD tell is the kind most of it has within this many units
     LOW_DETAIL_VOTE_RADIUS = 24
+    # Something whose lowest point is this much above what is under it floats in the sky, as
+    # the places some maps hide up there do, so the radar shows what is under it instead. What
+    # is under it is measured in pixels this many times bigger
+    FLOATING_MIN_HEIGHT = 500
+    FLOATING_PIXEL_SCALE = 8
     FLAT_MIN_NORMAL_Z = 0.995
     # No roof has the color of these kinds of ground
     GROUND_COLOR_KINDS = (KIND_DARK_GRASS, KIND_LIGHT_GRASS, KIND_SAND)
@@ -320,7 +332,7 @@ class RadarGenerator:
         self._textures = []
         self._texture_indices = {}
         self.water_color = np.array((32, 52, 82), dtype=np.uint8)
-        self._water_tile = None
+        self.vanilla_tiles = {}
 
     # Main
 
@@ -333,12 +345,20 @@ class RadarGenerator:
         objects too, instead of keeping its radar, if the vanilla map is included.
         """
         self.include_vanilla_map = include_vanilla_map
-        self.tile_resolution = tile_resolution if tile_resolution in self.TILE_RESOLUTIONS else self.VANILLA_TILE_RESOLUTION
-        # The vanilla style gives flat colors, which need no more than one sample per pixel
-        self.samples = 1 if style == self.STYLE_VANILLA else self.SUPERSAMPLING
+        self.style = style
+        self.output_resolution = tile_resolution if tile_resolution in self.TILE_RESOLUTIONS else self.VANILLA_TILE_RESOLUTION
+        # The resolution the tiles are drawn at, which is the one they are written at unless they are enlarged
+        self.tile_resolution = (self.output_resolution if self.output_resolution <= self.MAX_DRAWN_TILE_RESOLUTION
+                                else self.ENLARGED_TILE_DRAWN_RESOLUTION)
+        # The vanilla style gives flat colors, which need no more than one sample per pixel, and
+        # the tiles that are enlarged get their smooth edges from being enlarged
+        self.samples = (1 if style == self.STYLE_VANILLA or self.tile_resolution != self.output_resolution
+                        else self.SUPERSAMPLING)
         self.block_tiles = max(1, min(self.MAX_BLOCK_TILES, self.MAX_BLOCK_RESOLUTION // (self.tile_resolution * self.samples)))
-        self.texture_sample_size = min(self.TEXTURE_SAMPLE_SIZE * max(1, self.tile_resolution // self.VANILLA_TILE_RESOLUTION),
-                                       self.MAX_TEXTURE_SAMPLE_SIZE)
+        # The flat colors of the vanilla style need no more texture detail than the original radar
+        self.texture_sample_size = (self.TEXTURE_SAMPLE_SIZE if style == self.STYLE_VANILLA else
+                                    min(self.TEXTURE_SAMPLE_SIZE * max(1, self.tile_resolution // self.VANILLA_TILE_RESOLUTION),
+                                        self.MAX_TEXTURE_SAMPLE_SIZE))
         self.light_intensity = float(light_intensity)
         self.excluded_mods = {mod.lower() for mod in excluded_mods}
 
@@ -350,6 +370,9 @@ class RadarGenerator:
 
     def _generate(self, map_size, output_dir, progress, style):
         radar_map_size = self.get_radar_map_size() or map_size
+        # Inside the water map of the game there is only the water of water.dat files, which is
+        # why the maps add their own sea, and outside it there is sea everywhere
+        self.water_map_size = max(self._get_limit_adjuster_size('Water map size') or map_size, self.VANILLA_MAP_SIZE)
         tiles_per_row = max(radar_map_size // self.TILE_WORLD_SIZE, self.VANILLA_TILES_PER_ROW)
         progress(f'Radar map size: {radar_map_size} ({tiles_per_row * tiles_per_row} tiles)')
 
@@ -361,12 +384,12 @@ class RadarGenerator:
         water_quads = self._read_water_quads(mod_files)
         progress(f'{len(instances)} objects found in the installed mods')
 
-        vanilla_tiles = self._read_vanilla_tiles()
+        self.vanilla_tiles = self._read_vanilla_tiles()
         collisions = None
 
         if self.include_vanilla_map:
             # Only the color of the sea is taken from the original radar
-            vanilla_tiles = {}
+            self.vanilla_tiles = {}
 
         if style == self.STYLE_VANILLA:
             progress('Reading the collisions...')
@@ -377,6 +400,8 @@ class RadarGenerator:
         self._texture_indices = {}
 
         blocks, scene = self._assign_instances_to_blocks(instances, collisions, radar_map_size, tiles_per_row, progress)
+        # What the scene was made from is not needed anymore, and takes a lot of memory
+        del instances, collisions
         scene['atlas'] = np.stack(self._textures)
         scene['water_quads'] = water_quads
         scene['road_segments'] = self._read_road_segments(mod_files) if style == self.STYLE_VANILLA else np.zeros((0, 4), np.float32)
@@ -388,57 +413,138 @@ class RadarGenerator:
                 os.remove(os.path.join(output_dir, file_name))
         os.makedirs(output_dir, exist_ok=True)
 
-        tile_resolution = self.tile_resolution
-        preview_tile_resolution = min(tile_resolution, self.PREVIEW_MAX_RESOLUTION // tiles_per_row)
-        preview = Image.new('RGB', (preview_tile_resolution * tiles_per_row, preview_tile_resolution * tiles_per_row))
+        self.output_dir = output_dir
+        self.tiles_per_row = tiles_per_row
+        self.preview_tile_resolution = min(self.output_resolution, self.PREVIEW_MAX_RESOLUTION // tiles_per_row)
+        preview_size = self.preview_tile_resolution
+        preview = Image.new('RGB', (preview_size * tiles_per_row, preview_size * tiles_per_row))
         written_tiles = set()
-        water_data = None
 
-        def write_tile(tile_row, tile_col, tile_image):
-            nonlocal water_data
-
-            tile_name = f'radar{tile_row * tiles_per_row + tile_col:02d}'
-            image = Image.fromarray(tile_image, 'RGB')
-            preview.paste(image.resize((preview_tile_resolution, preview_tile_resolution), Image.BOX),
-                          (tile_col * preview_tile_resolution, tile_row * preview_tile_resolution))
-
-            # Every tile of open sea is the same, so it is only compressed once
-            if tile_image is self._water_tile:
-                if water_data is None:
-                    water_data = self._compress_dxt1(image)
-                data = water_data
-            else:
-                data = self._compress_dxt1(image)
-
-            with open(os.path.join(output_dir, f'{tile_name}.txd'), 'wb') as txd_file:
-                txd_file.write(self._write_txd(tile_name, tile_resolution, data))
-
-            written_tiles.add((tile_row, tile_col))
-
-        # The tiles are written as soon as their block is drawn, so they are not all kept in memory
-        for i, (block_row, block_col, color_sums, sample_counts) in enumerate(self._render_blocks(blocks, scene, style)):
+        # The tiles with objects are written by the processes that draw their blocks
+        for i, previews in enumerate(self._render_blocks(blocks, scene, style)):
             progress(f'Drawing the objects... ({i + 1}/{len(blocks)})')
-            block_image = self._get_block_image(block_row, block_col, color_sums, sample_counts, vanilla_tiles, tiles_per_row)
 
-            for row in range(self.block_tiles):
-                for col in range(self.block_tiles):
-                    tile_row = block_row * self.block_tiles + row
-                    tile_col = block_col * self.block_tiles + col
+            for tile_row, tile_col, preview_tile in previews:
+                preview.paste(Image.fromarray(preview_tile, 'RGB'), (tile_col * preview_size, tile_row * preview_size))
+                written_tiles.add((tile_row, tile_col))
 
-                    if tile_row < tiles_per_row and tile_col < tiles_per_row:
-                        write_tile(tile_row, tile_col, block_image[row * tile_resolution:(row + 1) * tile_resolution,
-                                                                   col * tile_resolution:(col + 1) * tile_resolution])
+        # The others only have the original radar or the sea, so they keep the size of the
+        # original radar when the tiles are enlarged, as more pixels would show nothing more
+        resolution = (self.output_resolution if self.output_resolution <= self.MAX_DRAWN_TILE_RESOLUTION
+                      else self.UNDRAWN_TILE_RESOLUTION)
+        water_data = None
 
         for tile_row in range(tiles_per_row):
             progress(f'Writing the radar tiles... ({tile_row * tiles_per_row}/{tiles_per_row * tiles_per_row})')
 
             for tile_col in range(tiles_per_row):
-                if (tile_row, tile_col) not in written_tiles:
-                    write_tile(tile_row, tile_col, self._get_background_tile(tile_row, tile_col, vanilla_tiles, tiles_per_row))
+                if (tile_row, tile_col) in written_tiles:
+                    continue
+
+                tile_image, is_water = self._get_background_tile(tile_row, tile_col, resolution)
+                image = Image.fromarray(tile_image, 'RGB')
+                preview.paste(image.resize((preview_size, preview_size), Image.BOX),
+                              (tile_col * preview_size, tile_row * preview_size))
+
+                # Every tile of open sea is the same, so it is only compressed once
+                if is_water:
+                    if water_data is None:
+                        water_data = self._compress_dxt1(image)
+                    self._write_tile_file(tile_row, tile_col, resolution, water_data)
+                else:
+                    self._write_tile_file(tile_row, tile_col, resolution, self._compress_dxt1(image))
 
         preview.save(os.path.join(output_dir, 'radar_preview.png'))
         progress(f'Radar saved at: {output_dir}')
         return output_dir
+
+    def _write_tile_file(self, tile_row, tile_col, resolution, data):
+        tile_name = f'radar{tile_row * self.tiles_per_row + tile_col:02d}'
+
+        with open(os.path.join(self.output_dir, f'{tile_name}.txd'), 'wb') as txd_file:
+            txd_file.write(self._write_txd(tile_name, resolution, data))
+
+    def _finish_block(self, block_row, block_col, color_sums, sample_counts):
+        """
+        Makes the tiles of a drawn block, with the radar of the original map where nothing was
+        drawn, and writes them. Returns each one's row and column and its image for the preview.
+        """
+        resolution = self.tile_resolution
+        preview_size = self.preview_tile_resolution
+        previews = []
+
+        for row in range(self.block_tiles):
+            for col in range(self.block_tiles):
+                tile_row = block_row * self.block_tiles + row
+                tile_col = block_col * self.block_tiles + col
+
+                if tile_row >= self.tiles_per_row or tile_col >= self.tiles_per_row:
+                    continue
+
+                pixels = (slice(row * resolution, (row + 1) * resolution), slice(col * resolution, (col + 1) * resolution))
+                tile_image = self._get_tile_image(tile_row, tile_col, color_sums[pixels], sample_counts[pixels])
+                tile_image = Image.fromarray(tile_image, 'RGB')
+                self._write_tile_file(tile_row, tile_col, self.output_resolution, self._compress_dxt1(tile_image))
+                previews.append((tile_row, tile_col, np.asarray(tile_image.resize((preview_size, preview_size), Image.BOX))))
+
+        return previews
+
+    def _get_tile_image(self, tile_row, tile_col, color_sums, sample_counts):
+        """
+        Returns the image of a tile from the samples that were drawn of each of its pixels.
+        Averaging them smooths the edges of the objects, and the ones that no object covers
+        keep the radar of the original map. Tiles drawn smaller than they are written are
+        enlarged keeping their edges smooth.
+        """
+        samples_count = self.samples * self.samples
+        drawn_background = self._get_background_tile(tile_row, tile_col, self.tile_resolution)[0]
+        empty_counts = (samples_count - sample_counts.astype(np.float32))[:, :, None]
+        drawn = np.round((color_sums + empty_counts * drawn_background) / samples_count).astype(np.uint8)
+
+        if self.output_resolution == self.tile_resolution:
+            return drawn
+
+        size = (self.output_resolution, self.output_resolution)
+        background = self._get_background_tile(tile_row, tile_col, self.output_resolution)[0]
+
+        if self.style == self.STYLE_VANILLA:
+            # Each flat color is enlarged on its own and every pixel takes the one that covers
+            # the most of it, which gives smooth edges instead of big square pixels
+            keys = (drawn[:, :, 0].astype(np.int32) << 16) | (drawn[:, :, 1].astype(np.int32) << 8) | drawn[:, :, 2]
+            keys[sample_counts == 0] = -1
+            colors, labels = np.unique(keys, return_inverse=True)
+            labels = labels.reshape(keys.shape)
+            palette = np.stack(((colors >> 16) & 0xFF, (colors >> 8) & 0xFF, colors & 0xFF), axis=1).astype(np.uint8)
+
+            if len(colors) == 1:
+                return background.copy() if colors[0] == -1 else np.broadcast_to(palette[0], size + (3,)).copy()
+
+            best_share = np.zeros(size, dtype=np.uint8)
+            best_label = np.zeros(size, dtype=np.uint8 if len(colors) <= 256 else np.uint16)
+
+            for label in range(len(colors)):
+                share = Image.fromarray(((labels == label) * 255).astype(np.uint8), 'L').resize(size, Image.BILINEAR)
+                share = np.asarray(share)
+                np.copyto(best_label, label, where=share > best_share, casting='unsafe')
+                np.maximum(best_share, share, out=best_share)
+
+            image = palette[best_label]
+
+            # What nothing was drawn on is the label of -1, the first one
+            if colors[0] == -1:
+                empty = best_label == 0
+                image[empty] = background[empty]
+
+            return image
+
+        # The realistic style is enlarged smoothly, and so is how much of each pixel was drawn
+        coverage = sample_counts.astype(np.float32) / samples_count
+        coverage = Image.fromarray(np.round(coverage * 255).astype(np.uint8), 'L').resize(size, Image.BILINEAR)
+        coverage = (np.asarray(coverage).astype(np.float32) / 255)[:, :, None]
+        colors = np.where(sample_counts[:, :, None] > 0,
+                          np.round(color_sums / np.maximum(sample_counts, 1)[:, :, None]), drawn_background).astype(np.uint8)
+        colors = np.asarray(Image.fromarray(colors, 'RGB').resize(size, Image.BICUBIC)).astype(np.float32)
+        return np.round(colors * coverage + background * (1 - coverage)).astype(np.uint8)
 
     def _render_blocks(self, blocks, scene, style):
         """
@@ -451,47 +557,62 @@ class RadarGenerator:
         workers_count = min((os.cpu_count() or 1) - 1, len(pending), self.MAX_WORKERS)
         memories = []
 
-        if workers_count > 1:
-            try:
-                scene_specs = {}
+        try:
+            if workers_count > 1:
+                try:
+                    scene_specs = {}
 
-                for name, array in scene.items():
-                    memory = shared_memory.SharedMemory(create=True, size=max(array.nbytes, 1))
-                    memories.append(memory)
-                    np.ndarray(array.shape, dtype=array.dtype, buffer=memory.buf)[...] = array
-                    scene_specs[name] = (memory.name, array.shape, array.dtype.str)
+                    for name in list(scene):
+                        array = scene[name]
+                        memory = shared_memory.SharedMemory(create=True, size=max(array.nbytes, 1))
+                        memories.append(memory)
+                        shared = np.ndarray(array.shape, dtype=array.dtype, buffer=memory.buf)
+                        shared[...] = array
+                        # The scene is only kept once, in the memory the processes share
+                        scene[name] = shared
+                        del array
+                        scene_specs[name] = (memory.name, shared.shape, shared.dtype.str)
 
-                with ProcessPoolExecutor(workers_count, initializer=_start_block_worker,
-                                         initargs=(self._get_worker_state(), scene_specs)) as executor:
-                    tasks = {executor.submit(_draw_block, block, style): block for block in pending}
+                    with ProcessPoolExecutor(workers_count, initializer=_start_block_worker,
+                                             initargs=(self._get_worker_state(), scene_specs)) as executor:
+                        tasks = {executor.submit(_draw_block, block, style): block for block in pending}
 
-                    for task in as_completed(tasks):
-                        result = task.result()
-                        pending.remove(tasks[task])
-                        yield result
-            except (OSError, RuntimeError, MemoryError) as error:
-                print(f'Could not draw with several processes ({error}), drawing with one...')
-            finally:
-                for memory in memories:
-                    memory.close()
-                    memory.unlink()
+                        for task in as_completed(tasks):
+                            result = task.result()
+                            pending.remove(tasks[task])
+                            yield result
+                except (OSError, RuntimeError, MemoryError) as error:
+                    print(f'Could not draw with several processes ({error}), drawing with one...')
 
-        for block in list(pending):
-            yield self._render_block(block, scene, style)
+            for block in list(pending):
+                yield self._render_block(block, scene, style)
+        finally:
+            # The views of the shared memory have to go before it is released
+            for name in list(scene):
+                scene[name] = None
+
+            for memory in memories:
+                memory.close()
+                memory.unlink()
 
     def _get_worker_state(self):
         # What a process needs to draw blocks, which leaves out the files that are open
-        return {name: getattr(self, name) for name in ('tile_resolution', 'block_tiles', 'light_intensity',
-                                                       'water_color', 'samples')}
+        return {name: getattr(self, name) for name in ('tile_resolution', 'output_resolution', 'block_tiles', 'light_intensity',
+                                                       'water_color', 'samples', 'water_map_size', 'style', 'output_dir',
+                                                       'tiles_per_row', 'preview_tile_resolution', 'vanilla_tiles')}
 
     def get_radar_map_size(self):
         # The radar map size of fastman92 Limit Adjuster sets how many tiles the game loads
+        return self._get_limit_adjuster_size('Radar map size')
+
+    def _get_limit_adjuster_size(self, name):
+        # A map size set in the INI file of fastman92 Limit Adjuster, or 0 if it is not set
         ini_path = os.path.join(self.game_dir, 'fastman92limitAdjuster_GTASA.ini')
 
         if os.path.isfile(ini_path):
             with open(ini_path, 'r', encoding='latin-1') as ini_file:
                 for line in ini_file:
-                    match = re.match(r'^\s*Radar map size\s*=\s*(\d+)', line, re.IGNORECASE)
+                    match = re.match(rf'^\s*{re.escape(name)}\s*=\s*(\d+)', line, re.IGNORECASE)
                     if match:
                         return int(match.group(1))
 
@@ -772,7 +893,8 @@ class RadarGenerator:
 
             with open(water_path, 'r', encoding='latin-1') as water_file:
                 for line in water_file:
-                    elements = line.split()
+                    # The game reads commas as spaces, and this tool writes them
+                    elements = line.replace(',', ' ').split()
 
                     # Each point has its position, flow and size, and the line ends with its flags
                     if len(elements) not in (22, 29):
@@ -799,11 +921,9 @@ class RadarGenerator:
 
         if not os.path.isfile(gta3_path):
             print(f'{gta3_path} was not found, the original map will not be on the radar')
-            self._water_tile = np.full((self.tile_resolution, self.tile_resolution, 3), self.water_color, dtype=np.uint8)
             return vanilla_tiles
 
         archive = ImgArchive(gta3_path)
-        self._water_tile = np.empty((self.tile_resolution, self.tile_resolution, 3), dtype=np.uint8)
 
         for tile_index in range(self.VANILLA_TILES_PER_ROW * self.VANILLA_TILES_PER_ROW):
             name = f'radar{tile_index:02d}.txd'
@@ -815,49 +935,37 @@ class RadarGenerator:
 
             if textures:
                 # They are resized when they are used, as it is only once and they take a lot of memory
-                vanilla_tiles[divmod(tile_index, self.VANILLA_TILES_PER_ROW)] = next(iter(textures.values())).convert('RGB')
+                vanilla_tiles[divmod(tile_index, self.VANILLA_TILES_PER_ROW)] = np.asarray(next(iter(textures.values())).convert('RGB'))
 
         archive.close()
 
         # The open sea of the original radar is in its corners
         if (self.VANILLA_TILES_PER_ROW - 1, self.VANILLA_TILES_PER_ROW - 1) in vanilla_tiles:
-            corner = vanilla_tiles[(self.VANILLA_TILES_PER_ROW - 1, self.VANILLA_TILES_PER_ROW - 1)]
+            corner = Image.fromarray(vanilla_tiles[(self.VANILLA_TILES_PER_ROW - 1, self.VANILLA_TILES_PER_ROW - 1)], 'RGB')
             corner = np.asarray(corner.resize((self.VANILLA_TILE_RESOLUTION, self.VANILLA_TILE_RESOLUTION), Image.BICUBIC))
             self.water_color = np.median(corner[-16:, -16:].reshape(-1, 3), axis=0).astype(np.uint8)
 
-        self._water_tile[:] = self.water_color
-
         return vanilla_tiles
 
-    def _get_background_tile(self, tile_row, tile_col, vanilla_tiles, tiles_per_row):
-        # The original map is in the middle of the radar
-        margin = (tiles_per_row - self.VANILLA_TILES_PER_ROW) // 2
-        image = vanilla_tiles.get((tile_row - margin, tile_col - margin))
+    def _get_background_tile(self, tile_row, tile_col, resolution):
+        # The radar of the original map in the middle of the radar, or the sea, and whether it is the sea
+        margin = (self.tiles_per_row - self.VANILLA_TILES_PER_ROW) // 2
+        image = self.vanilla_tiles.get((tile_row - margin, tile_col - margin))
 
         if image is None:
-            return self._water_tile
+            # The same one is given every time, so it must not be changed
+            water_tiles = self.__dict__.setdefault('_water_tiles', {})
 
-        return np.asarray(image.resize((self.tile_resolution, self.tile_resolution), Image.BICUBIC))
+            if resolution not in water_tiles:
+                water_tiles[resolution] = np.full((resolution, resolution, 3), self.water_color, dtype=np.uint8)
+                water_tiles[resolution].flags.writeable = False
 
-    def _get_block_image(self, block_row, block_col, color_sums, sample_counts, vanilla_tiles, tiles_per_row):
-        """
-        Returns the image of a block from the samples that were drawn of each of its pixels.
-        Averaging them smooths the edges of the objects, and the ones that no object covers
-        keep the radar of the original map.
-        """
-        tile_resolution = self.tile_resolution
-        background = np.empty((self.block_tiles * tile_resolution, self.block_tiles * tile_resolution, 3), dtype=np.uint8)
+            return water_tiles[resolution], True
 
-        for row in range(self.block_tiles):
-            for col in range(self.block_tiles):
-                tile = self._get_background_tile(block_row * self.block_tiles + row, block_col * self.block_tiles + col,
-                                                 vanilla_tiles, tiles_per_row)
-                background[row * tile_resolution:(row + 1) * tile_resolution,
-                           col * tile_resolution:(col + 1) * tile_resolution] = tile
+        if image.shape[0] != resolution:
+            image = np.asarray(Image.fromarray(image, 'RGB').resize((resolution, resolution), Image.BICUBIC))
 
-        samples_count = self.samples * self.samples
-        empty_counts = (samples_count - sample_counts.astype(np.float64))[:, :, None]
-        return np.round((color_sums + empty_counts * background) / samples_count).astype(np.uint8)
+        return image, False
 
     # Models
 
@@ -972,10 +1080,17 @@ class RadarGenerator:
         together, so that they can be shared by the processes that draw the blocks.
         """
         half = radar_map_size / 2
-        block_world_size = self.block_tiles * self.TILE_WORLD_SIZE
+        block_world_size = self._get_block_world_size()
         blocks_per_row = math.ceil(tiles_per_row / self.block_tiles)
         blocks = {}
-        models = sorted({entry['ide_object'] for entry in instances})
+
+        def is_drawn(entry):
+            # The vanilla style only draws what has a collision, and the LODs that stand in for land
+            collision = collisions.get(entry['ide_object'][0].lower())
+            return entry.get('stand_in') or (collision is not None and not collision['is_prop'])
+
+        models = sorted({entry['ide_object'] for entry in instances if collisions is None or is_drawn(entry)})
+
         model_indices = {}
         collision_indices = {}
         scene_models = []
@@ -990,7 +1105,11 @@ class RadarGenerator:
 
         for entry in instances:
             ide_object = entry['ide_object']
-            model = self._model_cache.get(ide_object)
+
+            if ide_object not in self._model_cache:
+                continue
+
+            model = self._model_cache[ide_object]
             collision = None
             stand_in = entry.get('stand_in', False)
 
@@ -1038,31 +1157,50 @@ class RadarGenerator:
         self._model_cache = {}
         blocks = [(block_row, block_col, block_instances, radar_map_size)
                   for (block_row, block_col), block_instances in sorted(blocks.items())]
-        return blocks, self._build_scene(scene_models, scene_collisions)
+        # The vanilla style does not light the models, so it needs no prelighting
+        return blocks, self._build_scene(scene_models, scene_collisions, vertex_colors=collisions is None)
 
     @staticmethod
-    def _build_scene(models, collisions):
-        def join(arrays, shape, dtype):
-            return np.concatenate(arrays).astype(dtype, copy=False) if arrays else np.zeros(shape, dtype=dtype)
+    def _build_scene(models, collisions, vertex_colors=True):
+        def join(items, key, shape, dtype):
+            # Each array is freed as soon as it is copied, so the scene does not take twice the memory
+            joined = np.empty((sum(len(item[key]) for item in items),) + shape[1:], dtype=dtype)
+            start = 0
+
+            for item in items:
+                array = item.pop(key)
+                joined[start:start + len(array)] = array
+                start += len(array)
+
+            return joined
 
         def get_ranges(counts):
             ends = np.cumsum(np.array(counts, dtype=np.int64))
             return np.stack((ends - counts, ends), axis=1).reshape(-1, 2)
 
-        return {
-            'vertices': join([model['vertices'] for model in models], (0, 3), np.float32),
+        scene = {
             'vertex_ranges': get_ranges([len(model['vertices']) for model in models]),
-            'triangles': join([model['triangles'] for model in models], (0, 3), np.int32),
             'triangle_ranges': get_ranges([len(model['triangles']) for model in models]),
-            'triangle_uvs': join([model['triangle_uvs'] for model in models], (0, 3, 2), np.float32),
-            'triangle_vertex_colors': join([model['triangle_vertex_colors'] for model in models], (0, 3, 3), np.uint8),
-            'triangle_textures': join([model['triangle_textures'] for model in models], (0,), np.int32),
-            'triangle_colors': join([model['triangle_colors'] for model in models], (0, 4), np.uint8),
-            'collision_triangles': join([collision['triangles'] for collision in collisions], (0, 3, 3), np.float32),
-            'collision_kinds': join([collision['kinds'] for collision in collisions], (0,), np.uint8),
-            'collision_surfaces': join([collision['surfaces'] for collision in collisions], (0,), np.uint8),
             'collision_ranges': get_ranges([len(collision['triangles']) for collision in collisions]),
         }
+
+        if not vertex_colors:
+            for model in models:
+                model.pop('triangle_vertex_colors', None)
+
+        scene['triangle_vertex_colors'] = (join(models, 'triangle_vertex_colors', (0, 3, 3), np.uint8) if vertex_colors
+                                           else np.zeros((0, 3, 3), dtype=np.uint8))
+
+        for key, shape, dtype in (('vertices', (0, 3), np.float32), ('triangles', (0, 3), np.int32),
+                                  ('triangle_uvs', (0, 3, 2), np.float32), ('triangle_textures', (0,), np.int32),
+                                  ('triangle_colors', (0, 4), np.uint8)):
+            scene[key] = join(models, key, shape, dtype)
+
+        for key, shape, dtype in (('collision_triangles', (0, 3, 3), np.float32), ('collision_kinds', (0,), np.uint8),
+                                  ('collision_surfaces', (0,), np.uint8)):
+            scene[key] = join(collisions, key[len('collision_'):], shape, dtype)
+
+        return scene
 
     def _get_model(self, ide_object):
         if ide_object in self._model_cache:
@@ -1085,9 +1223,12 @@ class RadarGenerator:
             model['triangle_textures'] = np.array(texture_indices, dtype=np.int32)[model['triangle_materials']]
             model['triangle_colors'] = np.array([color for texture_name, color in model['materials']],
                                                 dtype=np.uint8).reshape(-1, 4)[model['triangle_materials']]
-            # What each triangle has at its corners is the same wherever the object is placed
-            model['triangle_uvs'] = model['uvs'][model['triangles']]
-            model['triangle_vertex_colors'] = model['colors'][model['triangles']]
+            # What each triangle has at its corners is the same wherever the object is placed. The
+            # vanilla style does not light the models, so it needs no prelighting
+            model['triangle_uvs'] = model.pop('uvs')[model['triangles']]
+            colors = model.pop('colors')
+            model['triangle_vertex_colors'] = colors[model['triangles']] if self.style != self.STYLE_VANILLA else None
+            del model['triangle_materials'], model['materials']
 
         self._model_cache[ide_object] = model
         return model
@@ -1575,26 +1716,110 @@ class RadarGenerator:
 
         return placements, stand_ins
 
+    def _get_shown_placements(self, block, scene, view):
+        """
+        Returns the placements of a block as _get_placements does, without the ones that float
+        high above what is under them.
+        """
+        placements, stand_ins = self._get_placements(block[2])
+        everything = placements + stand_ins
+        heights = [self._get_placement_heights(placement, scene) for placement in everything]
+        lowest = [float(z.min()) if len(z) else np.inf for z in heights]
+
+        if len(everything) < 2 or min(lowest) == np.inf:
+            return placements, stand_ins
+
+        floor = min(lowest)
+        candidates = [i for i, low in enumerate(lowest) if np.isfinite(low) and low > floor + self.FLOATING_MIN_HEIGHT]
+
+        if not candidates:
+            return placements, stand_ins
+
+        # The highest point of everything else, in bigger pixels
+        left, top, units_per_pixel, resolution = view
+        scale = self.FLOATING_PIXEL_SCALE
+        coarse_resolution = max(1, resolution // scale)
+        coarse_size = units_per_pixel * resolution / coarse_resolution
+        under = np.full(coarse_resolution * coarse_resolution, -np.inf, dtype=np.float32)
+        candidate_set = set(candidates)
+        others = [self._get_placement_triangles(placement, scene) for i, placement in enumerate(everything)
+                  if i not in candidate_set]
+        others = [triangles for triangles in others if len(triangles)]
+
+        if others:
+            triangles = np.concatenate(others)
+            self._rasterize((triangles[:, :, 0] - left) / coarse_size, (top - triangles[:, :, 1]) / coarse_size,
+                            triangles[:, :, 2], coarse_resolution, under)
+
+        under = under.reshape(coarse_resolution, coarse_resolution)
+        floating = set()
+
+        for i in candidates:
+            triangles = self._get_placement_triangles(everything[i], scene)
+            first_col = int(np.clip((triangles[:, :, 0].min() - left) // coarse_size, 0, coarse_resolution))
+            last_col = int(np.clip((triangles[:, :, 0].max() - left) // coarse_size + 1, 0, coarse_resolution))
+            first_row = int(np.clip((top - triangles[:, :, 1].max()) // coarse_size, 0, coarse_resolution))
+            last_row = int(np.clip((top - triangles[:, :, 1].min()) // coarse_size + 1, 0, coarse_resolution))
+            below = under[first_row:last_row, first_col:last_col]
+            below = below[below > -np.inf]
+
+            # What has nothing under it, such as land built high over the sea, stays
+            if len(below) and lowest[i] > float(np.median(below)) + self.FLOATING_MIN_HEIGHT:
+                floating.add(i)
+
+        count = len(placements)
+        return ([placement for i, placement in enumerate(placements) if i not in floating],
+                [placement for i, placement in enumerate(stand_ins) if count + i not in floating])
+
+    @staticmethod
+    def _get_placement_geometry(placement, scene):
+        # The collision of a placement, or its model if it has none, as triangles of its own space
+        model_index, collision_index, matrix, position = placement
+
+        if collision_index >= 0:
+            start, end = scene['collision_ranges'][collision_index]
+            return scene['collision_triangles'][start:end]
+
+        if model_index >= 0:
+            first_vertex, last_vertex = scene['vertex_ranges'][model_index]
+            first_triangle, last_triangle = scene['triangle_ranges'][model_index]
+            return scene['vertices'][first_vertex:last_vertex][scene['triangles'][first_triangle:last_triangle]]
+
+        return np.zeros((0, 3, 3), dtype=np.float32)
+
+    def _get_placement_heights(self, placement, scene):
+        geometry = self._get_placement_geometry(placement, scene)
+        return geometry.reshape(-1, 3) @ placement[2][:, 2] + placement[3][2]
+
+    def _get_placement_triangles(self, placement, scene):
+        return self._get_placement_geometry(placement, scene) @ placement[2] + placement[3]
+
     def _get_block_view(self, block):
         # The left and the top of a block in the world, the size of its pixels and how many they are on each side
         block_row, block_col, block_instances, radar_map_size = block
         half = radar_map_size / 2
-        samples = self.samples
-        resolution = self.block_tiles * self.tile_resolution * samples
-        units_per_pixel = self.TILE_WORLD_SIZE / (self.tile_resolution * samples)
-        left = -half + block_col * self.block_tiles * self.TILE_WORLD_SIZE
-        top = half - block_row * self.block_tiles * self.TILE_WORLD_SIZE
+        resolution = self._get_block_resolution()
+        units_per_pixel = self.TILE_WORLD_SIZE / (self.tile_resolution * self.samples)
+        left = -half + block_col * self._get_block_world_size()
+        top = half - block_row * self._get_block_world_size()
         return left, top, units_per_pixel, resolution
 
+    def _get_block_world_size(self):
+        return self.block_tiles * self.TILE_WORLD_SIZE
+
+    def _get_block_resolution(self):
+        # How many samples a block has on each side
+        return self.block_tiles * self.tile_resolution * self.samples
+
     def _get_water_levels(self, view, scene):
-        # The sea outside the original map is everywhere, while inside it only the water of
+        # The sea outside the water map is everywhere, while inside it only the water of
         # water.dat files is
         left, top, units_per_pixel, resolution = view
         water_levels = np.full(resolution * resolution, -np.inf, dtype=np.float32)
         pixel_x = left + (np.arange(resolution) + 0.5) * units_per_pixel
         pixel_y = top - (np.arange(resolution) + 0.5) * units_per_pixel
-        vanilla_half = self.VANILLA_MAP_SIZE / 2
-        outside = ((np.abs(pixel_y)[:, None] > vanilla_half) | (np.abs(pixel_x)[None, :] > vanilla_half)).ravel()
+        water_half = self.water_map_size / 2
+        outside = ((np.abs(pixel_y)[:, None] > water_half) | (np.abs(pixel_x)[None, :] > water_half)).ravel()
         water_levels[outside] = 0.0
         water_quads = scene['water_quads']
 
@@ -1617,7 +1842,7 @@ class RadarGenerator:
         if style == self.STYLE_VANILLA:
             color, covered, depth, water_levels = self._render_vanilla_style(block, scene, view)
         else:
-            placements, stand_ins = self._get_placements(block[2])
+            placements, stand_ins = self._get_shown_placements(block, scene, view)
             depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
             color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
 
@@ -1641,7 +1866,7 @@ class RadarGenerator:
         size = resolution // samples
         color_sums = color.reshape(size, samples, size, samples, 3).sum(axis=(1, 3), dtype=np.uint16)
         sample_counts = covered.reshape(size, samples, size, samples).sum(axis=(1, 3), dtype=np.uint8)
-        return block_row, block_col, color_sums, sample_counts
+        return self._finish_block(block_row, block_col, color_sums, sample_counts)
 
     def _render_vanilla_style(self, block, scene, view):
         """
@@ -1653,7 +1878,7 @@ class RadarGenerator:
         resolution = view[3]
         depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
         color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
-        placements, stand_ins = self._get_placements(block[2])
+        placements, stand_ins = self._get_shown_placements(block, scene, view)
         color, covered, depth, kinds = self._render_vanilla_rules(placements, scene, view, depth, color, stand_ins)
         road_segments = scene['road_segments']
 
@@ -1895,11 +2120,13 @@ class RadarGenerator:
             if not shown.any():
                 continue
 
-            arrays = (triangles, scene['triangle_uvs'][triangle_slice], scene['triangle_vertex_colors'][triangle_slice],
+            vertex_colors = scene['triangle_vertex_colors']
+            arrays = (triangles, scene['triangle_uvs'][triangle_slice],
+                      vertex_colors[triangle_slice] if len(vertex_colors) else np.zeros((0, 3, 3), np.uint8),
                       scene['triangle_textures'][triangle_slice], scene['triangle_colors'][triangle_slice])
 
             for part, array in zip(parts, arrays):
-                part.append(array if shown.all() else array[shown])
+                part.append(array if shown.all() or not len(array) else array[shown])
 
         if not parts[0]:
             return

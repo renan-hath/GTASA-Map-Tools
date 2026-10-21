@@ -20,7 +20,7 @@ RADAR_POLL_MS = 200       # How often the radar generation progress is shown
 # The radar styles, by the name they are shown with
 RADAR_STYLES = {"Realistic": "realistic", "Vanilla": "vanilla"}
 # The resolutions of each radar tile, by the name they are shown with
-RADAR_RESOLUTIONS = {"128": 128, "256 (original)": 256, "512": 512, "1024": 1024}
+RADAR_RESOLUTIONS = {"128": 128, "256 (original)": 256, "512": 512, "1024": 1024, "2048": 2048}
 RADAR_LIGHT_RANGE = (0.25, 3.0)
 RADAR_LIGHT_STEP = 0.05
 
