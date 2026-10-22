@@ -42,6 +42,7 @@ from application.file_types.str.ipl import Ipl
 from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
 from application.tools.game_limits import GameLimits
+from application.tools.installation_check import InstallationCheck
 from application.tools.img_console import IMGConsole
 from application.tools.path_generator import PathGenerator
 from application.tools.path_positioner import PathPositioner
@@ -58,9 +59,8 @@ OUTPUT_MAP_DIR = os.path.join(OUTPUT_DIR, "map")
 OUTPUT_PATHS_DIR = os.path.join(OUTPUT_DIR, "gta3.img")
 PATHS_TEMP_DIR = os.path.join(OUTPUT_DIR, "paths_temp")
 OUTPUT_RADAR_DIR = os.path.join("radar_files", "gta3.img")
-BASE_PATHS_MOD_NAME = "paths_files"
-OUTPUT_BASE_PATHS_DIR = os.path.join(BASE_PATHS_MOD_NAME, "gta3.img")
 RESOURCES_DIR = "resources"
+MAP_LIMITS_ASI_PATH = os.path.join(RESOURCES_DIR, "MapLimits", "$$MapLimits.asi")
 IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
 IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
 IMG_CONSOLE_NAME = "fastman92ImgConsole32.exe"
@@ -320,28 +320,9 @@ def generate_radar(map_size, radar_settings, progress):
                                radar_settings['radar_resolution'], radar_settings['radar_light_intensity'],
                                radar_settings['radar_excluded_mods'])
 
-def generate_base_paths(gui_map_size):
-    # The paths map size the game uses, or the one chosen in the window when the INI does not set it
-    game_dir = get_game_dir()
-    game_limits = GameLimits(game_dir)
-    paths_map_size, is_set = game_limits.get('Paths map size')
-    paths_map_size = paths_map_size if is_set else int(gui_map_size)
-
-    try:
-        written = PathPositioner().build_base_set(game_dir, paths_map_size, OUTPUT_BASE_PATHS_DIR,
-                                                  skipped_mods=[BASE_PATHS_MOD_NAME])
-    except PathPositioner.UnsupportedFormatError as e:
-        return f"Base paths not generated: {e}"
-
-    patch, _ = game_limits.get('Apply paths limit patch')
-    status = (f"{written} node files for a {paths_map_size} paths map saved at {os.path.abspath(BASE_PATHS_MOD_NAME)}. "
-              f"Copy that folder into modloader, and generate it again after installing a map mod with paths.")
-
-    if not is_set or not patch:
-        status += (f" The game also needs \"Apply paths limit patch = 1\" and \"Paths map size = {paths_map_size}\" "
-                   f"in {GameLimits.INI_NAME}.")
-
-    return status
+def create_installation_check():
+    # The check of the game folder set in the settings, which can also install $$MapLimits.asi
+    return InstallationCheck(get_game_dir(), os.path.abspath(MAP_LIMITS_ASI_PATH))
 
 def process_files():
     global fix_command, id_command, path_command, generate_paths_command
@@ -362,7 +343,7 @@ def process_files():
                  generate_radar_func=generate_radar,
                  radar_settings=get_radar_settings(), save_radar_settings_func=save_radar_settings,
                  list_radar_mods_func=list_radar_mods,
-                 generate_base_paths_func=generate_base_paths)
+                 create_installation_check_func=create_installation_check)
     root.mainloop()
     
     if app.map_coordinates and app.map_coordinates != (0.0, 0.0, 0.0):

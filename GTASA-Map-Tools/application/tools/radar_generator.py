@@ -252,6 +252,9 @@ class RadarGenerator:
     BUILDING_MIN_WALL_SHARE = 0.3
     # Buildings are wider than this, and so are the objects that are not props, such as lamp posts
     BUILDING_MIN_HALF_WIDTH = 3
+    # What each pixel shows is the one most pixels show within this many units, once the roads
+    # are drawn, which removes the specks
+    SMOOTHING_RADIUS = 4
     PROP_MAX_HALF_WIDTH = 3
     # Collisions this wide, of so few triangles and this flat, are planes of water or sky
     BACKDROP_MIN_HALF_WIDTH = 1000
@@ -265,12 +268,14 @@ class RadarGenerator:
     LAND_ANY_SHAPE_MIN_HALF_WIDTH = 220
     # What the colors of a LOD tell is the kind most of it has within this many units
     LOW_DETAIL_VOTE_RADIUS = 24
-    # Something whose lowest point is this much above what is under it floats in the sky, as
-    # the places some maps hide up there do, so the radar shows what is under it instead. What
-    # is under it is measured in pixels this many times bigger
     # How far past the edge of a water.dat quad the ground under its level is drawn as water
     WATER_MARGIN = 40
     WATER_MARGIN_MIN_DEPTH = 5
+    # Ground only this much under the water is a shore, which the radar shows as land
+    WATER_MIN_DEPTH = 3
+    # Something whose lowest point is this much above what is under it floats in the sky, as
+    # the places some maps hide up there do, so the radar shows what is under it instead. What
+    # is under it is measured in pixels this many times bigger
     FLOATING_MIN_HEIGHT = 500
     FLOATING_PIXEL_SCALE = 8
     FLAT_MIN_NORMAL_Z = 0.995
@@ -278,6 +283,10 @@ class RadarGenerator:
     GROUND_COLOR_KINDS = (KIND_DARK_GRASS, KIND_LIGHT_GRASS, KIND_SAND)
     # A model shows a collision if it is not further below it than this
     MODEL_MAX_DEPTH = 5
+    # The color of the ground is taken from the models no higher than this over its collision, so
+    # what hangs over it, such as the crowns of the trees, does not hide it. Where no model is that
+    # close, the highest one is used, as some collisions are lower than their models
+    MODEL_MAX_HEIGHT = 4
     # Tarmac wider than a road, such as a car park or a runway, is shown as concrete. What is only
     # known to be a road by its color has to be narrower, and most of what is around each of its
     # points has to have that color too, as the dark stones of a cliff do not
@@ -723,16 +732,9 @@ class RadarGenerator:
 
     def _get_limit_adjuster_size(self, name):
         # A map size set in the INI file of fastman92 Limit Adjuster, or 0 if it is not set
-        ini_path = os.path.join(self.game_dir, 'fastman92limitAdjuster_GTASA.ini')
+        from application.tools.limit_adjusters import LimitAdjusters
 
-        if os.path.isfile(ini_path):
-            with open(ini_path, 'r', encoding='latin-1') as ini_file:
-                for line in ini_file:
-                    match = re.match(rf'^\s*{re.escape(name)}\s*=\s*(\d+)', line, re.IGNORECASE)
-                    if match:
-                        return int(match.group(1))
-
-        return 0
+        return LimitAdjusters(self.game_dir).get_fla_size(name)
 
     # Game and mod files
 
@@ -2034,7 +2036,8 @@ class RadarGenerator:
 
             water_levels = self._get_water_levels(view, scene)
 
-        color[covered & (depth < water_levels)] = self.water_color
+        min_depth = self.WATER_MIN_DEPTH if style == self.STYLE_VANILLA else 0
+        color[covered & (depth < water_levels - min_depth)] = self.water_color
         color[~covered] = 0
 
         size = resolution // samples
@@ -2049,20 +2052,36 @@ class RadarGenerator:
         concrete. Returns the color of each pixel, which ones it draws, the height of the
         collision there and the water level.
         """
-        resolution = view[3]
+        left, top, units_per_pixel, resolution = view
         depth = np.full(resolution * resolution, -np.inf, dtype=np.float32)
         color = np.zeros((resolution * resolution, 3), dtype=np.uint8)
         placements, stand_ins = self._get_shown_placements(block, scene, view)
-        color, covered, depth, kinds = self._render_vanilla_rules(placements, scene, view, depth, color, stand_ins)
+        water_levels = self._get_water_levels(view, scene)
         road_segments = scene['road_segments']
+        strokes = near = None
 
         if len(road_segments):
             strokes, near = self._draw_road_strokes(road_segments, view)
-            paved = covered & np.isin(kinds, self.PAVED_KINDS) & near
-            color[paved & strokes] = self.VANILLA_PALETTE[self.KIND_ROAD]
-            color[paved & ~strokes] = self.VANILLA_PALETTE[self.KIND_CONCRETE]
 
-        return color, covered, depth, self._get_water_levels(view, scene)
+        color, covered, depth, kinds = self._render_vanilla_rules(placements, scene, view, depth, color, stand_ins)
+
+        if strokes is not None:
+            paved = covered & np.isin(kinds, self.PAVED_KINDS) & near
+            kinds[paved & strokes] = self.KIND_ROAD
+            kinds[paved & ~strokes] = self.KIND_CONCRETE
+
+        radius = max(1, round(self.SMOOTHING_RADIUS / units_per_pixel))
+        kinds = self._smooth_kinds(kinds.reshape(resolution, resolution), radius).ravel()
+        return self._get_vanilla_palette()[kinds], kinds != self.KIND_NONE, depth, water_levels
+
+    def _get_vanilla_palette(self):
+        palette = np.zeros((max(self.VANILLA_PALETTE) + 2, 3), dtype=np.uint8)
+
+        for kind, kind_color in self.VANILLA_PALETTE.items():
+            palette[kind] = kind_color
+
+        palette[self.KIND_WATER] = self.water_color
+        return palette
 
     def _draw_road_strokes(self, road_segments, view):
         """
@@ -2207,7 +2226,12 @@ class RadarGenerator:
 
         if (textured_kinds & ~filled).any():
             # Their own colors are used, as how they are lit says nothing about what they are
-            self._draw_models(placements, scene, view, depth, color, None, textured_kinds & ~filled)
+            ceiling = collision_depth + self.MODEL_MAX_HEIGHT
+            self._draw_models(placements, scene, view, depth, color, None, textured_kinds & ~filled, ceiling)
+            uncovered = textured_kinds & ~filled & (depth < collision_depth - self.MODEL_MAX_DEPTH).reshape(resolution, resolution)
+
+            if uncovered.any():
+                self._draw_models(placements, scene, view, depth, color, None, uncovered)
 
         # Some maps give the collision of their land to an object with an empty model, and its
         # looks to a LOD on its own, so the stand-ins also show where the models do not
@@ -2224,7 +2248,7 @@ class RadarGenerator:
             color[used] = stand_in_color[used]
 
         color, covered, kinds = self._paint_vanilla_style(kinds, collision_depth.reshape(resolution, resolution),
-                                                   color, depth >= collision_depth - self.MODEL_MAX_DEPTH, used)
+                                                          color, depth >= collision_depth - self.MODEL_MAX_DEPTH, used)
         return color, covered, collision_depth, kinds
 
     def _rasterize_collisions(self, placements, scene, view):
@@ -2249,11 +2273,12 @@ class RadarGenerator:
 
         return collision_depth, kinds
 
-    def _draw_models(self, placements, scene, view, depth, color, light_intensity, needed=None):
+    def _draw_models(self, placements, scene, view, depth, color, light_intensity, needed=None, ceiling=None):
         """
         Draws the models of the objects of a block, lit as the game would light them, or with
         their own colors if there is no light intensity. If only some pixels are needed, the
-        triangles that are away from all of them are left out.
+        triangles that are away from all of them are left out. With a ceiling, nothing higher
+        than it is drawn on each pixel.
         """
         left, top, units_per_pixel, resolution = view
         right, bottom = left + resolution * units_per_pixel, top - resolution * units_per_pixel
@@ -2308,7 +2333,7 @@ class RadarGenerator:
         triangles, uvs, vertex_colors, textures, material_colors = (np.concatenate(part) for part in parts)
         self._rasterize((triangles[:, :, 0] - left) / units_per_pixel, (top - triangles[:, :, 1]) / units_per_pixel,
                         triangles[:, :, 2], resolution, depth, color, uvs, vertex_colors, textures, material_colors,
-                        scene['atlas'], light_intensity=light_intensity)
+                        scene['atlas'], light_intensity=light_intensity, ceiling=ceiling)
 
     def _paint_vanilla_style(self, kinds, heights, textured_color, textured, low_detail=None):
         """
@@ -2402,15 +2427,8 @@ class RadarGenerator:
                     get_wide(solid_color_roads, self.COLOR_ROAD_MAX_HALF_WIDTH))
             kinds[(roads & get_fine(wide)) | (color_roads & ~get_fine(solid_color_roads))] = self.KIND_CONCRETE
 
-        kinds = self._smooth_kinds(kinds)
-
-        palette = np.zeros((max(self.VANILLA_PALETTE) + 2, 3), dtype=np.uint8)
-        for kind, kind_color in self.VANILLA_PALETTE.items():
-            palette[kind] = kind_color
-        palette[self.KIND_WATER] = self.water_color
-
         kinds = kinds.ravel()
-        return palette[kinds], kinds != self.KIND_NONE, kinds
+        return self._get_vanilla_palette()[kinds], kinds != self.KIND_NONE, kinds
 
     def _get_low_detail_kinds(self, color_kinds, low_detail, units_per_pixel):
         # A LOD gives each of its big faces its own texture, so what its colors tell is the kind
@@ -2515,17 +2533,22 @@ class RadarGenerator:
         return mask if value else ~mask
 
     @staticmethod
-    def _smooth_kinds(kinds):
-        # Each pixel gets the kind most of its neighbours have, which removes the specks
+    def _smooth_kinds(kinds, radius=1):
+        # Each pixel gets the kind most of the pixels within the radius have, which removes the specks
         smoothed = kinds.copy()
-        most_votes = np.zeros(kinds.shape, dtype=np.uint8)
+        most_votes = np.zeros(kinds.shape, dtype=np.int16)
+        padded = np.pad(kinds, radius, mode='edge')
+        length = 2 * radius + 1
 
         for kind in np.unique(kinds):
-            same = (kinds == kind).astype(np.uint8)
-            padded = np.pad(same, 1, mode='edge')
-            rows = padded[:-2] + padded[1:-1] + padded[2:]
+            # The square is summed along each side in turn, with small integers as it is quicker
+            same = (padded == kind).astype(np.int16)
+            sums = np.cumsum(same, axis=0, dtype=np.int16)
+            columns = np.concatenate([sums[length - 1:length], sums[length:] - sums[:-length]])
+            sums = np.cumsum(columns, axis=1, dtype=np.int16)
+            votes = np.concatenate([sums[:, length - 1:length], sums[:, length:] - sums[:, :-length]], axis=1)
             # The pixel itself counts once more, so a tie leaves it as it is
-            votes = (rows[:, :-2] + rows[:, 1:-1] + rows[:, 2:]) * 2 + same
+            votes = votes * 2 + (kinds == kind)
             more = votes > most_votes
             smoothed[more] = kind
             most_votes[more] = votes[more]
@@ -2533,7 +2556,8 @@ class RadarGenerator:
         return smoothed
 
     def _rasterize(self, screen_x, screen_y, z, resolution, depth, color=None, uvs=None, vertex_colors=None,
-                   textures=None, material_colors=None, atlas=None, labels=None, label_buffer=None, light_intensity=None):
+                   textures=None, material_colors=None, atlas=None, labels=None, label_buffer=None, light_intensity=None,
+                   ceiling=None):
         """
         Draws triangles seen from above, keeping in the depth buffer the highest point of each
         pixel. Without a color buffer, only the depth buffer is updated, and the label buffer
@@ -2606,7 +2630,10 @@ class RadarGenerator:
                 triangle_z = z[triangles]
                 pixel_z = weight0 * triangle_z[:, 0] + weight1 * triangle_z[:, 1] + weight2 * triangle_z[:, 2]
 
-                higher = np.flatnonzero(pixel_z > depth[pixels])
+                if ceiling is None:
+                    higher = np.flatnonzero(pixel_z > depth[pixels])
+                else:
+                    higher = np.flatnonzero((pixel_z > depth[pixels]) & (pixel_z <= ceiling[pixels]))
 
                 if not len(higher):
                     continue

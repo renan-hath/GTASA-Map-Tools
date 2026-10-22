@@ -29,12 +29,13 @@ class MapGui:
     def __init__(self, root, get_coordinates_func, installed_coordinates, map_size=6000, args=None, procobj_available=False,
                  game_dir='', save_game_dir_func=None, generate_radar_func=None,
                  radar_settings=None, save_radar_settings_func=None, list_radar_mods_func=None,
-                 generate_base_paths_func=None):
+                 create_installation_check_func=None):
         self.root = root
         self.game_dir = game_dir
         self.save_game_dir_func = save_game_dir_func
         self.generate_radar_func = generate_radar_func
-        self.generate_base_paths_func = generate_base_paths_func
+        self.create_installation_check_func = create_installation_check_func
+        self.installation_window = None
         self.radar_settings = self._get_valid_radar_settings(radar_settings or {})
         self.save_radar_settings_func = save_radar_settings_func
         self.list_radar_mods_func = list_radar_mods_func
@@ -324,10 +325,10 @@ class MapGui:
                                           corner_radius=10)
         self.radar_button.pack(fill="x", padx=12, pady=(12, 0))
 
-        self.base_paths_button = ctk.CTkButton(self.actions_section, text="Generate base paths",
-                                               command=self.generate_base_paths, height=34,
-                                               corner_radius=10)
-        self.base_paths_button.pack(fill="x", padx=12, pady=(8, 0))
+        self.installation_button = ctk.CTkButton(self.actions_section, text="Check installation",
+                                                 command=self.check_installation, height=34,
+                                                 corner_radius=10)
+        self.installation_button.pack(fill="x", padx=12, pady=(8, 0))
 
         self.radar_status_label = ctk.CTkLabel(self.actions_section, text="", wraplength=280,
                                                justify="left", anchor="w",
@@ -722,24 +723,23 @@ class MapGui:
             self.radar_button.configure(state=tk.NORMAL)
             self.save_button.configure(state=tk.NORMAL)
 
-    # Base paths
+    # Installation check
 
-    def generate_base_paths(self):
-        if not self.generate_base_paths_func or (self._radar_thread and self._radar_thread.is_alive()):
+    def check_installation(self):
+        if not self.create_installation_check_func:
             return
 
         if not self.game_dir:
             self.radar_status_label.configure(text="Set the GTA San Andreas folder in the settings first.")
             return
 
-        try:
-            status = self.generate_base_paths_func(int(self.map_size_var.get()))
-        except Exception as error:
-            traceback.print_exc()
-            status = f"Base paths generation failed: {error}"
+        if self.installation_window is not None and self.installation_window.window.winfo_exists():
+            self.installation_window.window.focus()
+            return
 
-        print(status)
-        self.radar_status_label.configure(text=status)
+        from application.gui.installation_window import InstallationWindow
+
+        self.installation_window = InstallationWindow(self.root, self.create_installation_check_func)
 
     # Map interaction
 

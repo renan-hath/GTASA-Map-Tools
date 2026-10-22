@@ -218,16 +218,9 @@ class PathGenerator:
 
     def get_paths_map_size(self):
         # The paths map size of fastman92 Limit Adjuster sets how many node files the game loads
-        ini_path = os.path.join(self.game_dir, 'fastman92limitAdjuster_GTASA.ini')
+        from application.tools.limit_adjusters import LimitAdjusters
 
-        if self.game_dir and os.path.isfile(ini_path):
-            with open(ini_path, 'r', encoding='latin-1') as ini_file:
-                for line in ini_file:
-                    match = re.match(r'^\s*Paths map size\s*=\s*(\d+)', line, re.IGNORECASE)
-                    if match:
-                        return int(match.group(1))
-
-        return 0
+        return LimitAdjusters(self.game_dir).get_fla_size('Paths map size') if self.game_dir else 0
 
     # Collision
 

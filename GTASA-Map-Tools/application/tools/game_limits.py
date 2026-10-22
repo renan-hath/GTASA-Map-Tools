@@ -1,6 +1,7 @@
 import os
 import re
 
+from application.tools.limit_adjusters import UNLIMITED, LimitAdjusters
 from application.tools.radar_generator import ImgArchive
 
 
@@ -11,9 +12,8 @@ class GameLimits:
     crashes or ignores the files when they are over these limits.
     """
 
-    INI_NAME = 'fastman92limitAdjuster_GTASA.ini'
-    OPEN_LIMIT_ADJUSTER_INI_NAME = 'iii.vc.sa.limitadjuster.ini'
-    UNLIMITED = 1 << 31
+    INI_NAME = LimitAdjusters.FLA_INI_NAME
+    UNLIMITED = UNLIMITED
 
     # The game's own values, used when the INI leaves a line commented out
     DEFAULTS = {
@@ -31,36 +31,12 @@ class GameLimits:
 
     def __init__(self, game_dir):
         self.game_dir = game_dir or ''
-        self.ini_path = os.path.join(self.game_dir, self.INI_NAME)
-        self.has_ini = bool(self.game_dir) and os.path.isfile(self.ini_path)
-        self._settings = self._read_ini() if self.has_ini else {}
-
-    def _read_ini(self):
-        settings = {}
-
-        with open(self.ini_path, 'r', encoding='latin-1') as ini_file:
-            for line in ini_file:
-                match = re.match(r'^\s*([^;#=\[][^=]*?)\s*=\s*([^;#\s]+)', line)
-
-                if match:
-                    settings[match.group(1).lower()] = match.group(2)
-
-        return settings
+        self.adjusters = LimitAdjusters(self.game_dir)
+        self.has_ini = self.adjusters.has_fla
 
     def get(self, name):
         """Returns the value the game uses and whether the INI sets it."""
-        value = self._settings.get(name.lower())
-
-        if value is None:
-            return self.DEFAULTS.get(name, 0), False
-
-        if value.lower() == 'unlimited':
-            return self.UNLIMITED, True
-
-        try:
-            return int(float(value)), True
-        except ValueError:
-            return self.DEFAULTS.get(name, 0), False
+        return self.adjusters.get_fla(name, self.DEFAULTS.get(name, 0))
 
     @staticmethod
     def warn(message):
@@ -166,20 +142,12 @@ class GameLimits:
     def check_open_limit_adjuster(self):
         # With fastman92 Limit Adjuster also installed, Open Limit Adjuster's EntityIpl patch writes
         # the new array one byte too early (at 0x405C3C), which corrupts CIplStore::LoadIplBoundingBox
-        paths = [os.path.join(self.game_dir, name) for name in os.listdir(self.game_dir)
-                 if name.lower() == self.OPEN_LIMIT_ADJUSTER_INI_NAME]
+        ola = self.adjusters.ola
 
-        for folder in ('scripts', 'modloader'):
-            for root, dirs, files in os.walk(os.path.join(self.game_dir, folder)):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                paths += [os.path.join(root, name) for name in files if name.lower() == self.OPEN_LIMIT_ADJUSTER_INI_NAME]
-
-        for path in paths:
-            with open(path, 'r', encoding='latin-1') as ini_file:
-                if any(re.match(r'^\s*EntityIpl\s*=', line, re.IGNORECASE) for line in ini_file):
-                    self.warn(f'Open Limit Adjuster sets EntityIpl in {path}. Together with fastman92 Limit Adjuster '
-                              'it corrupts the game code and the game crashes while loading the map. Comment that '
-                              f'line out and set "Entity index array" in {self.INI_NAME} instead.')
+        if ola is not None and ola.get('EntityIpl') is not None:
+            self.warn(f'Open Limit Adjuster sets EntityIpl in {ola.path}. Together with fastman92 Limit Adjuster '
+                      'it corrupts the game code and the game crashes while loading the map. The "Check '
+                      'installation" button fixes it.')
 
     # Paths
 
@@ -201,7 +169,7 @@ class GameLimits:
             self.warn(f'the node files were made for a {written_map_size} paths map, but the game uses '
                       f'{paths_map_size}{" without the paths limit patch" if not patch else ""}. Set '
                       f'"Apply paths limit patch = 1" and "Paths map size = {written_map_size}" in {self.INI_NAME}, '
-                      'and install a full set of node files for that size (the "Generate base paths" button). '
+                      'and install a full set of node files for that size (the "Check installation" button). '
                       'Otherwise the game will not load these paths, and node files numbered over 63 can '
                       'overwrite the animation files the game streams, which crashes it.')
 
