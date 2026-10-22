@@ -33,7 +33,8 @@ class Water(DataEntryStr):
         self._point_3_y = float(elements[self.POINT_3_Y_INDEX])
         self._point_3_z = float(elements[self.POINT_3_Z_INDEX])
         
-        if len(elements) == 29:
+        # Quads have four points, followed by their flags, which some mods leave out
+        if len(elements) >= 28:
             self._point_4_x = float(elements[self.POINT_4_X_INDEX])
             self._point_4_y = float(elements[self.POINT_4_Y_INDEX])
             self._point_4_z = float(elements[self.POINT_4_Z_INDEX])
@@ -157,7 +158,7 @@ class Water(DataEntryStr):
         self.point_2_z += z
         self.point_3_z += z
         
-        if len(self.elements) == 29:
+        if len(self.elements) >= 28:
             self.point_4_x += x
             self.point_4_y += y
             self.point_4_z += z

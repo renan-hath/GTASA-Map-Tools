@@ -89,6 +89,111 @@ class PathPositioner:
         print(f"(paths) {len(moved_files)} node files moved.")
         return bool(moved_files)
 
+    def build_base_set(self, game_dir, paths_map_size, output_dir, skipped_mods=()):
+        """
+        Writes the node files a game with a bigger paths map needs besides the ones of its mods.
+        With the paths limit patch, the game loads one FM92 file for every tile, but the original
+        files in gta3.img are in the original format for 8x8 tiles. This converts them to the new
+        grid, where they keep their place, and adds an empty file for every other tile. Tiles that
+        a modloader mod already has a file for are left out, so modloader has no two files with
+        the same name and the mods keep their own paths.
+        Returns the number of files written, or raises UnsupportedFormatError.
+        """
+        from application.tools.radar_generator import ImgArchive
+
+        grid_width = int(paths_map_size) // self.TILE_SIZE
+
+        if grid_width not in self.GRID_WIDTHS or grid_width == self.VANILLA_GRID_WIDTH:
+            raise self.UnsupportedFormatError(f"{paths_map_size} is not a paths map size that needs a full set of "
+                                              f"node files. Supported sizes: "
+                                              f"{', '.join(str(w * self.TILE_SIZE) for w in self.GRID_WIDTHS[1:])}.")
+
+        gta3_path = os.path.join(game_dir or '', 'models', 'gta3.img')
+
+        if not os.path.isfile(gta3_path):
+            raise self.UnsupportedFormatError(f"the original paths were not found, as {gta3_path} does not exist.")
+
+        archive = ImgArchive(gta3_path)
+
+        try:
+            original_files = []
+
+            for name in archive.entries:
+                match = self.NODE_FILE_PATTERN.match(name)
+
+                if match and int(match.group(1)) < self.VANILLA_GRID_WIDTH ** 2:
+                    data = archive.read(name)
+                    layout = self._detect_layout(name, data)
+                    counts = self._read_counts(data, layout)
+                    original_files.append({'name': name, 'area': int(match.group(1)), 'data': data,
+                                           'layout': layout, 'counts': counts, 'is_empty': not any(counts)})
+        finally:
+            archive.close()
+
+        if any(node_file['layout'] is not self.LAYOUT_VANILLA for node_file in original_files):
+            raise self.UnsupportedFormatError(f"the node files in {gta3_path} are not the original ones, "
+                                              "so they cannot be converted.")
+
+        original_files.sort(key=lambda node_file: node_file['area'])
+        converted = self._move_node_files(original_files, 0, 0, 0, paths_map_size)
+        covered = self._list_mod_node_areas(os.path.join(game_dir, 'modloader'), skipped_mods)
+        empty_file = bytes(self.FM92_PREFIX + b"VER2" + struct.pack('<5I', 0, 0, 0, 0, 0) + self.FM92_EOF)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Files of an earlier set are replaced, as the mods installed since then may cover other tiles
+        for file_name in os.listdir(output_dir):
+            if self.NODE_FILE_PATTERN.match(file_name):
+                os.remove(os.path.join(output_dir, file_name))
+
+        written = 0
+
+        for area in range(grid_width * grid_width):
+            if area in covered:
+                continue
+
+            with open(os.path.join(output_dir, f"nodes{area}.dat"), 'wb') as f:
+                f.write(converted.get(f"nodes{area}.dat", empty_file))
+
+            written += 1
+
+        print(f"(paths) {written} node files written for a {paths_map_size} paths map, "
+              f"{len(covered)} tiles left to the installed mods.")
+        return written
+
+    def _list_mod_node_areas(self, modloader_dir, skipped_mods):
+        from application.tools.radar_generator import ImgArchive
+
+        areas = set()
+        skipped = {mod.lower() for mod in skipped_mods}
+
+        if not os.path.isdir(modloader_dir):
+            return areas
+
+        for mod_directory in os.listdir(modloader_dir):
+            mod_path = os.path.join(modloader_dir, mod_directory)
+
+            # Modloader ignores the folders whose name starts with a dot
+            if not os.path.isdir(mod_path) or mod_directory.startswith('.') or mod_directory.lower() in skipped:
+                continue
+
+            for root, dirs, files in os.walk(mod_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                names = list(files)
+
+                for file_name in files:
+                    if file_name.lower().endswith('.img'):
+                        archive = ImgArchive(os.path.join(root, file_name))
+                        names.extend(archive.entries)
+
+                for name in names:
+                    match = self.NODE_FILE_PATTERN.match(name)
+
+                    if match:
+                        areas.add(int(match.group(1)))
+
+        return areas
+
     # Reading
 
     def _read_node_files(self, input_dir):

@@ -41,6 +41,7 @@ from application.file_types.str.ide import Ide
 from application.file_types.str.ipl import Ipl
 from application.data_entry_types.binary.ipl.inst_binary import InstBinary
 from application.gui.map_gui import MapGui
+from application.tools.game_limits import GameLimits
 from application.tools.img_console import IMGConsole
 from application.tools.path_generator import PathGenerator
 from application.tools.path_positioner import PathPositioner
@@ -57,6 +58,8 @@ OUTPUT_MAP_DIR = os.path.join(OUTPUT_DIR, "map")
 OUTPUT_PATHS_DIR = os.path.join(OUTPUT_DIR, "gta3.img")
 PATHS_TEMP_DIR = os.path.join(OUTPUT_DIR, "paths_temp")
 OUTPUT_RADAR_DIR = os.path.join("radar_files", "gta3.img")
+BASE_PATHS_MOD_NAME = "paths_files"
+OUTPUT_BASE_PATHS_DIR = os.path.join(BASE_PATHS_MOD_NAME, "gta3.img")
 RESOURCES_DIR = "resources"
 IMG_CONSOLE_DIR = os.path.join(RESOURCES_DIR, "IMGconsole_32-bit")
 IMG_CONSOLE_TEMP_DIR = os.path.join(IMG_CONSOLE_DIR, "Temp")
@@ -317,6 +320,29 @@ def generate_radar(map_size, radar_settings, progress):
                                radar_settings['radar_resolution'], radar_settings['radar_light_intensity'],
                                radar_settings['radar_excluded_mods'])
 
+def generate_base_paths(gui_map_size):
+    # The paths map size the game uses, or the one chosen in the window when the INI does not set it
+    game_dir = get_game_dir()
+    game_limits = GameLimits(game_dir)
+    paths_map_size, is_set = game_limits.get('Paths map size')
+    paths_map_size = paths_map_size if is_set else int(gui_map_size)
+
+    try:
+        written = PathPositioner().build_base_set(game_dir, paths_map_size, OUTPUT_BASE_PATHS_DIR,
+                                                  skipped_mods=[BASE_PATHS_MOD_NAME])
+    except PathPositioner.UnsupportedFormatError as e:
+        return f"Base paths not generated: {e}"
+
+    patch, _ = game_limits.get('Apply paths limit patch')
+    status = (f"{written} node files for a {paths_map_size} paths map saved at {os.path.abspath(BASE_PATHS_MOD_NAME)}. "
+              f"Copy that folder into modloader, and generate it again after installing a map mod with paths.")
+
+    if not is_set or not patch:
+        status += (f" The game also needs \"Apply paths limit patch = 1\" and \"Paths map size = {paths_map_size}\" "
+                   f"in {GameLimits.INI_NAME}.")
+
+    return status
+
 def process_files():
     global fix_command, id_command, path_command, generate_paths_command
     global map_command, map_command_x, map_command_y, map_command_z, map_size
@@ -335,7 +361,8 @@ def process_files():
                  game_dir=get_game_dir(), save_game_dir_func=save_game_dir,
                  generate_radar_func=generate_radar,
                  radar_settings=get_radar_settings(), save_radar_settings_func=save_radar_settings,
-                 list_radar_mods_func=list_radar_mods)
+                 list_radar_mods_func=list_radar_mods,
+                 generate_base_paths_func=generate_base_paths)
     root.mainloop()
     
     if app.map_coordinates and app.map_coordinates != (0.0, 0.0, 0.0):
@@ -416,6 +443,8 @@ def process_files():
     # Paths are generated last, from where the objects of the map end up
     if generate_paths_command:
         generate_paths()
+
+    check_game_limits()
 
 def read_map_files():
     global mod_map_files
@@ -837,7 +866,10 @@ def write_map_files():
     for file in mod_map_files:
         original_filename = file.file_name
         modified_filepath = os.path.join(OUTPUT_MAP_DIR, original_filename)
-        
+
+        if isinstance(file, Dat) and file.section_water:
+            file.base_water_lines = get_game_water_lines()
+
         if not file_is_empty(file):
             if isinstance(file, IplBinary):
                 with open(modified_filepath, 'wb') as modified_file:
@@ -850,6 +882,44 @@ def write_map_files():
         else:
             if os.path.exists(modified_filepath):
                 os.remove(modified_filepath)
+
+def get_game_water_lines():
+    # The game's water.dat is copied as it is, as modloader compares the lines of every
+    # water.dat with it and removes the ones a mod leaves out
+    water_path = os.path.join(SA_DATA_DIR, 'water.dat') if SA_DATA_DIR else ''
+
+    if not os.path.isfile(water_path):
+        print('WARNING: the GTA San Andreas folder is not set or has no data\\water.dat, so the water.dat of this map '
+              'only has its own water. With modloader, the sea of the original map would disappear in game.')
+        return []
+
+    with open(water_path, 'r', encoding='latin-1') as f:
+        return [line.rstrip('\r\n') for line in f if line.strip() and line.strip().lower() != 'processed']
+
+def check_game_limits():
+    # Warns when the game set in the settings cannot load the map as it was written
+    game_limits = GameLimits(os.path.dirname(SA_DATA_DIR) if SA_DATA_DIR else '')
+
+    if not game_limits.has_ini:
+        return
+
+    # What the game reads once modloader merges the water.dat of every mod with its own
+    game_lines = GameLimits.read_water_lines(os.path.join(SA_DATA_DIR, 'water.dat'))
+    water_lines = set(game_lines)
+    output_water_path = os.path.join(OUTPUT_MAP_DIR, 'water.dat')
+
+    if os.path.isfile(output_water_path):
+        water_lines.update(GameLimits.read_water_lines(output_water_path))
+
+        if os.path.isdir(SA_MODLOADER_DIR):
+            for water_path in glob.glob(os.path.join(SA_MODLOADER_DIR, '*', '**', 'water.dat'), recursive=True):
+                if not os.path.relpath(water_path, SA_MODLOADER_DIR).startswith('.'):
+                    water_lines.update(GameLimits.read_water_lines(water_path))
+
+        game_limits.check_water(water_lines)
+
+    output_imgs = glob.glob(os.path.join(OUTPUT_IMG_DIR, '*.img'))
+    game_limits.check_stream_ipls(output_imgs)
 
 def rotate_coordinates():
     global coordinate_objects
@@ -1132,10 +1202,19 @@ def move_paths():
                 os.remove(node_file_path)
 
         if any(os.scandir(PATHS_TEMP_DIR)):
+            paths_map_size = get_paths_map_size()
             path_positioner = PathPositioner()
-            path_positioner.run(PATHS_TEMP_DIR, OUTPUT_PATHS_DIR, map_command_x, map_command_y, map_command_z, map_size)
+
+            if path_positioner.run(PATHS_TEMP_DIR, OUTPUT_PATHS_DIR, map_command_x, map_command_y, map_command_z,
+                                   paths_map_size):
+                GameLimits(get_game_dir()).check_paths(paths_map_size)
 
         shutil.rmtree(PATHS_TEMP_DIR)
+
+def get_paths_map_size():
+    # The paths map size the INI of the game sets, like the path generator, or else the chosen map size
+    paths_map_size, is_set = GameLimits(get_game_dir()).get('Paths map size')
+    return paths_map_size if is_set else int(map_size)
 
 def generate_paths():
     ide_models = {}
@@ -1186,7 +1265,9 @@ def generate_paths():
                     collision_files.append(file_path)
 
     path_generator = PathGenerator(os.path.dirname(SA_DATA_DIR), VANILLA_SURFACES_PATH)
-    path_generator.run(instances, collision_files, OUTPUT_PATHS_DIR, map_size)
+
+    if path_generator.run(instances, collision_files, OUTPUT_PATHS_DIR, map_size):
+        GameLimits(get_game_dir()).check_paths(get_paths_map_size())
 
 def get_input_file_path(file_name):
     for root, dirs, files in os.walk(INPUT_DIR):

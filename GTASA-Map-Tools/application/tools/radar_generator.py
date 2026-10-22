@@ -3,7 +3,8 @@ import math
 import os
 import re
 import struct
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import zlib
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from multiprocessing import shared_memory
 
 import numpy as np
@@ -137,7 +138,13 @@ class RadarGenerator:
     # Triangles are drawn in groups whose bounding boxes are rounded up to one of these sizes
     BUCKET_SIZES = tuple(range(1, 8)) + tuple(size << shift for shift in range(10) for size in (8, 10, 12))
     TXD_NAME_LENGTH = 32
-    PREVIEW_MAX_RESOLUTION = 4096
+    # The longest side of radar_preview.png, and of the part shown at the size of the tiles
+    PREVIEW_MAX_SIDE = 20480
+    PREVIEW_DETAIL_SIDE = 4096
+    # Where _write_txd puts the size of the texture, the size of its data and the data
+    TXD_SIZE_OFFSET = 132
+    TXD_DATA_SIZE_OFFSET = 140
+    TXD_DATA_OFFSET = 144
 
     RW_VERSION = 0x1803FFFF
     RW_STRUCT = 0x01
@@ -261,6 +268,9 @@ class RadarGenerator:
     # Something whose lowest point is this much above what is under it floats in the sky, as
     # the places some maps hide up there do, so the radar shows what is under it instead. What
     # is under it is measured in pixels this many times bigger
+    # How far past the edge of a water.dat quad the ground under its level is drawn as water
+    WATER_MARGIN = 40
+    WATER_MARGIN_MIN_DEPTH = 5
     FLOATING_MIN_HEIGHT = 500
     FLOATING_PIXEL_SCALE = 8
     FLAT_MIN_NORMAL_Z = 0.995
@@ -381,7 +391,7 @@ class RadarGenerator:
         self._index_assets(mod_files)
         self._read_ide_files(mod_files)
         instances = self._read_instances(mod_files)
-        water_quads = self._read_water_quads(mod_files)
+        water_quads, water_margins = self._read_water_quads(mod_files)
         progress(f'{len(instances)} objects found in the installed mods')
 
         self.vanilla_tiles = self._read_vanilla_tiles()
@@ -404,6 +414,7 @@ class RadarGenerator:
         del instances, collisions
         scene['atlas'] = np.stack(self._textures)
         scene['water_quads'] = water_quads
+        scene['water_margins'] = water_margins
         scene['road_segments'] = self._read_road_segments(mod_files) if style == self.STYLE_VANILLA else np.zeros((0, 4), np.float32)
         self._textures = []
         self._txd_cache = {}
@@ -415,18 +426,19 @@ class RadarGenerator:
 
         self.output_dir = output_dir
         self.tiles_per_row = tiles_per_row
-        self.preview_tile_resolution = min(self.output_resolution, self.PREVIEW_MAX_RESOLUTION // tiles_per_row)
-        preview_size = self.preview_tile_resolution
-        preview = Image.new('RGB', (preview_size * tiles_per_row, preview_size * tiles_per_row))
         written_tiles = set()
+        # What the previews show: the tiles with objects or the original radar, not open sea
+        shown_tiles = set()
 
         # The tiles with objects are written by the processes that draw their blocks
-        for i, previews in enumerate(self._render_blocks(blocks, scene, style)):
+        for i, block_tiles in enumerate(self._render_blocks(blocks, scene, style)):
             progress(f'Drawing the objects... ({i + 1}/{len(blocks)})')
 
-            for tile_row, tile_col, preview_tile in previews:
-                preview.paste(Image.fromarray(preview_tile, 'RGB'), (tile_col * preview_size, tile_row * preview_size))
+            for tile_row, tile_col, has_content in block_tiles:
                 written_tiles.add((tile_row, tile_col))
+
+                if has_content:
+                    shown_tiles.add((tile_row, tile_col))
 
         # The others only have the original radar or the sea, so they keep the size of the
         # original radar when the tiles are enlarged, as more pixels would show nothing more
@@ -443,8 +455,6 @@ class RadarGenerator:
 
                 tile_image, is_water = self._get_background_tile(tile_row, tile_col, resolution)
                 image = Image.fromarray(tile_image, 'RGB')
-                preview.paste(image.resize((preview_size, preview_size), Image.BOX),
-                              (tile_col * preview_size, tile_row * preview_size))
 
                 # Every tile of open sea is the same, so it is only compressed once
                 if is_water:
@@ -452,11 +462,115 @@ class RadarGenerator:
                         water_data = self._compress_dxt1(image)
                     self._write_tile_file(tile_row, tile_col, resolution, water_data)
                 else:
+                    shown_tiles.add((tile_row, tile_col))
                     self._write_tile_file(tile_row, tile_col, resolution, self._compress_dxt1(image))
 
-        preview.save(os.path.join(output_dir, 'radar_preview.png'))
+        progress('Making the previews...')
+        self._write_previews(shown_tiles)
         progress(f'Radar saved at: {output_dir}')
         return output_dir
+
+    # Previews
+
+    def _write_previews(self, shown_tiles):
+        """
+        Writes radar_preview.png, the part of the radar that is not open sea, and
+        radar_preview_detail.png, its most detailed part at the size of the tiles. Both are
+        made from the tiles as they were written, so they show what the game shows, DXT1
+        compression included. The preview keeps the size of the tiles unless it would be over
+        PREVIEW_MAX_SIDE pixels, and is written a row of tiles at a time to use little memory.
+        """
+        if not shown_tiles:
+            shown_tiles = {(self.tiles_per_row // 2, self.tiles_per_row // 2)}
+
+        # One tile of sea around what is shown
+        first_row = max(0, min(row for row, col in shown_tiles) - 1)
+        last_row = min(self.tiles_per_row - 1, max(row for row, col in shown_tiles) + 1)
+        first_col = max(0, min(col for row, col in shown_tiles) - 1)
+        last_col = min(self.tiles_per_row - 1, max(col for row, col in shown_tiles) + 1)
+        rows, cols = last_row - first_row + 1, last_col - first_col + 1
+        tile_size = max(1, min(self.output_resolution, self.PREVIEW_MAX_SIDE // max(rows, cols)))
+        detail_scores = np.zeros((rows, cols), dtype=np.float64)
+
+        def read_row(row):
+            images = [self._read_tile_file(first_row + row, first_col + col) for col in range(cols)]
+            band = np.zeros((tile_size, cols * tile_size, 3), dtype=np.uint8)
+
+            for col, image in enumerate(images):
+                # How much there is to see in a tile, to choose where the detail preview is
+                detail_scores[row, col] = float(np.asarray(image.convert('L').resize((64, 64), Image.BOX)).std())
+                band[:, col * tile_size:(col + 1) * tile_size] = np.asarray(
+                    image if image.width == tile_size else image.resize((tile_size, tile_size), Image.BOX))
+
+            return band
+
+        def read_lines(executor):
+            # A few rows of tiles are read at once, and only those are kept in memory
+            for start in range(0, rows, self.MAX_WORKERS):
+                for band in list(executor.map(read_row, range(start, min(rows, start + self.MAX_WORKERS)))):
+                    yield from band
+
+        with ThreadPoolExecutor(self.MAX_WORKERS) as executor:
+            self._write_png(os.path.join(self.output_dir, 'radar_preview.png'), cols * tile_size, rows * tile_size,
+                            read_lines(executor))
+
+        # The detail preview is the square of tiles with the most to see
+        detail_tiles = max(1, min(self.PREVIEW_DETAIL_SIDE // self.output_resolution, rows, cols))
+        sums = np.pad(detail_scores, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+        window = (sums[detail_tiles:, detail_tiles:] - sums[:-detail_tiles, detail_tiles:]
+                  - sums[detail_tiles:, :-detail_tiles] + sums[:-detail_tiles, :-detail_tiles])
+        top, left = np.unravel_index(int(window.argmax()), window.shape)
+        size = self.output_resolution
+        detail = Image.new('RGB', (detail_tiles * size, detail_tiles * size))
+
+        for row in range(detail_tiles):
+            for col in range(detail_tiles):
+                image = self._read_tile_file(first_row + top + row, first_col + left + col)
+                detail.paste(image if image.width == size else image.resize((size, size), Image.NEAREST),
+                             (col * size, row * size))
+
+        detail.save(os.path.join(self.output_dir, 'radar_preview_detail.png'))
+
+    def _read_tile_file(self, tile_row, tile_col):
+        # The image of a tile this generator wrote: a DXT1 texture after the headers of _write_txd
+        tile_name = f'radar{tile_row * self.tiles_per_row + tile_col:02d}'
+
+        with open(os.path.join(self.output_dir, f'{tile_name}.txd'), 'rb') as txd_file:
+            content = txd_file.read()
+
+        width, height = struct.unpack_from('<2H', content, self.TXD_SIZE_OFFSET)
+        data_size = struct.unpack_from('<I', content, self.TXD_DATA_SIZE_OFFSET)[0]
+        data = content[self.TXD_DATA_OFFSET:self.TXD_DATA_OFFSET + data_size]
+        return Image.frombytes('RGBA', (width, height), data, 'bcn', 1).convert('RGB')
+
+    @staticmethod
+    def _write_png(path, width, height, lines):
+        # A PNG written one line at a time, so the whole image never has to be in memory
+        def chunk(chunk_type, payload):
+            return (struct.pack('>I', len(payload)) + chunk_type + payload +
+                    struct.pack('>I', zlib.crc32(chunk_type + payload) & 0xFFFFFFFF))
+
+        compressor = zlib.compressobj(6)
+
+        with open(path, 'wb') as png_file:
+            png_file.write(b'\x89PNG\r\n\x1a\n')
+            png_file.write(chunk(b'IHDR', struct.pack('>2I5B', width, height, 8, 2, 0, 0, 0)))
+            pending = []
+            pending_size = 0
+
+            for line in lines:
+                # Each line starts with its filter type, none here
+                pending.append(compressor.compress(b'\x00' + np.ascontiguousarray(line).tobytes()))
+                pending_size += len(pending[-1])
+
+                if pending_size >= 1 << 20:
+                    png_file.write(chunk(b'IDAT', b''.join(pending)))
+                    pending = []
+                    pending_size = 0
+
+            pending.append(compressor.flush())
+            png_file.write(chunk(b'IDAT', b''.join(pending)))
+            png_file.write(chunk(b'IEND', b''))
 
     def _write_tile_file(self, tile_row, tile_col, resolution, data):
         tile_name = f'radar{tile_row * self.tiles_per_row + tile_col:02d}'
@@ -467,11 +581,10 @@ class RadarGenerator:
     def _finish_block(self, block_row, block_col, color_sums, sample_counts):
         """
         Makes the tiles of a drawn block, with the radar of the original map where nothing was
-        drawn, and writes them. Returns each one's row and column and its image for the preview.
+        drawn, and writes them. Returns the row and column of each one.
         """
         resolution = self.tile_resolution
-        preview_size = self.preview_tile_resolution
-        previews = []
+        written = []
 
         for row in range(self.block_tiles):
             for col in range(self.block_tiles):
@@ -485,9 +598,12 @@ class RadarGenerator:
                 tile_image = self._get_tile_image(tile_row, tile_col, color_sums[pixels], sample_counts[pixels])
                 tile_image = Image.fromarray(tile_image, 'RGB')
                 self._write_tile_file(tile_row, tile_col, self.output_resolution, self._compress_dxt1(tile_image))
-                previews.append((tile_row, tile_col, np.asarray(tile_image.resize((preview_size, preview_size), Image.BOX))))
+                # Whether there is anything on it besides open sea, for the previews
+                margin = (self.tiles_per_row - self.VANILLA_TILES_PER_ROW) // 2
+                has_content = bool(sample_counts[pixels].any()) or (tile_row - margin, tile_col - margin) in self.vanilla_tiles
+                written.append((tile_row, tile_col, has_content))
 
-        return previews
+        return written
 
     def _get_tile_image(self, tile_row, tile_col, color_sums, sample_counts):
         """
@@ -599,7 +715,7 @@ class RadarGenerator:
         # What a process needs to draw blocks, which leaves out the files that are open
         return {name: getattr(self, name) for name in ('tile_resolution', 'output_resolution', 'block_tiles', 'light_intensity',
                                                        'water_color', 'samples', 'water_map_size', 'style', 'output_dir',
-                                                       'tiles_per_row', 'preview_tile_resolution', 'vanilla_tiles')}
+                                                       'tiles_per_row', 'vanilla_tiles')}
 
     def get_radar_map_size(self):
         # The radar map size of fastman92 Limit Adjuster sets how many tiles the game loads
@@ -881,37 +997,84 @@ class RadarGenerator:
 
         return entries
 
+    @staticmethod
+    def _is_number(text):
+        try:
+            float(text)
+            return True
+        except ValueError:
+            return False
+
     def _read_water_quads(self, mod_files):
         # The water of the game and of every mod, as triangles, so what is under it is shown as water
         water_paths = [os.path.join(self.data_dir, 'water.dat')]
         water_paths += [file_path for file_path in mod_files if os.path.basename(file_path).lower() == 'water.dat']
         triangles = []
+        margin_triangles = []
+        # Mods for modloader carry the lines of the game's own water.dat, which are only read once
+        game_lines = set()
 
-        for water_path in water_paths:
+        for path_index, water_path in enumerate(water_paths):
             if not os.path.isfile(water_path):
                 continue
+
+            is_game_file = path_index == 0
 
             with open(water_path, 'r', encoding='latin-1') as water_file:
                 for line in water_file:
                     # The game reads commas as spaces, and this tool writes them
                     elements = line.replace(',', ' ').split()
 
-                    # Each point has its position, flow and size, and the line ends with its flags
-                    if len(elements) not in (22, 29):
+                    # Each point has its position, flow and size, and the line ends with its flags.
+                    # Some mods leave out the flags of a quad, which leaves 28 values
+                    if len(elements) not in (22, 28, 29):
                         continue
 
                     try:
                         points = [(float(elements[i]), float(elements[i + 1]), float(elements[i + 2]))
-                                  for i in range(0, len(elements) - 1, 7)]
+                                  for i in range(0, 21 if len(elements) == 22 else 28, 7)]
                     except ValueError:
                         continue
 
+                    line_key = tuple(round(float(element), 2) for element in elements if self._is_number(element))
+
+                    if is_game_file:
+                        game_lines.add(line_key)
+                    elif line_key in game_lines:
+                        continue
+
+                    if len(points) == 4:
+                        # Quads are rectangles along the axes, but mods list their corners in different
+                        # orders (the game's own files go across and then up, others go around), and
+                        # files moved by older versions of this tool can have the last corner left
+                        # behind, so the rectangle is taken from the first three
+                        xs, ys = [point[0] for point in points[:3]], [point[1] for point in points[:3]]
+                        level = sum(point[2] for point in points[:3]) / 3
+                        points = [(min(xs), min(ys), level), (max(xs), min(ys), level),
+                                  (max(xs), max(ys), level), (min(xs), max(ys), level)]
+
+                    middle_x = sum(point[0] for point in points) / len(points)
+                    middle_y = sum(point[1] for point in points) / len(points)
                     triangles.append(points[0:3])
 
                     if len(points) == 4:
-                        triangles.append((points[1], points[3], points[2]))
+                        triangles.append((points[0], points[2], points[3]))
 
-        return np.array(triangles, dtype=np.float32).reshape(-1, 3, 3)
+                    # A strip around the water of mods, for their sea floor that often reaches a bit
+                    # further than their water. The game's own water is drawn as it is
+                    if is_game_file:
+                        continue
+
+                    bigger = [(x + math.copysign(self.WATER_MARGIN, x - middle_x),
+                               y + math.copysign(self.WATER_MARGIN, y - middle_y), z) for x, y, z in points]
+
+                    for i in range(len(points)):
+                        j = (i + 1) % len(points)
+                        margin_triangles.append((points[i], points[j], bigger[j]))
+                        margin_triangles.append((points[i], bigger[j], bigger[i]))
+
+        return (np.array(triangles, dtype=np.float32).reshape(-1, 3, 3),
+                np.array(margin_triangles, dtype=np.float32).reshape(-1, 3, 3))
 
     # Vanilla radar
 
@@ -1826,6 +1989,17 @@ class RadarGenerator:
         if len(water_quads):
             self._rasterize((water_quads[:, :, 0] - left) / units_per_pixel, (top - water_quads[:, :, 1]) / units_per_pixel,
                             water_quads[:, :, 2], resolution, water_levels)
+
+        # Just past the edge of the water, only the ground well under its level is drawn as water,
+        # which is sea floor and not a beach
+        water_margins = scene['water_margins']
+
+        if len(water_margins):
+            margin_levels = np.full(resolution * resolution, -np.inf, dtype=np.float32)
+            self._rasterize((water_margins[:, :, 0] - left) / units_per_pixel, (top - water_margins[:, :, 1]) / units_per_pixel,
+                            water_margins[:, :, 2], resolution, margin_levels)
+            past_edge = water_levels == -np.inf
+            water_levels[past_edge] = margin_levels[past_edge] - self.WATER_MARGIN_MIN_DEPTH
 
         return water_levels
 

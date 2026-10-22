@@ -11,7 +11,10 @@ class Dat(ObjectsFile):
         self._section_water = []
         self._section_datobj = []
         self._section_tracks = []
-        
+        # Lines of the game's own water.dat, written before the water of the mod. Modloader
+        # merges every water.dat against the game's, so a line the mod leaves out is removed
+        self.base_water_lines = []
+
         self.read_file_sections()
             
     @property
@@ -90,6 +93,8 @@ class Dat(ObjectsFile):
         
         if self.section_water:
             file_content += 'processed' + '\n'
+            for line in self.base_water_lines:
+                file_content += line + '\n'
             for gta_object in self.section_water:
                 file_content += gta_object.content + '\n'
         elif self.section_datobj:
